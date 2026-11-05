@@ -222,6 +222,19 @@ def api_preview_payload():
                 "payloads": payloads,
             })
     except (ValidationError, ValueError) as e:
+        missing_notes = []
+        for v in vouchers:
+            v_no = v.get("voucher_number", "Invoice")
+            if not v.get("destination_account_id"):
+                missing_notes.append(f"{v_no}: Destination Account ID is required")
+            if not v.get("destination_address_id"):
+                missing_notes.append(f"{v_no}: Destination Address ID is required")
+        if missing_notes:
+            return jsonify({
+                "error": "Cannot generate BVC payload because required destination details are missing:\n\n"
+                         + "\n".join(missing_notes)
+                         + "\n\nPlease enter the Destination Account ID and Address ID directly in the table row (or update the Party Ledger in Tally)."
+            }), 422
         return jsonify({"error": f"Validation error generating payload: {str(e)}"}), 422
 
 
@@ -278,6 +291,19 @@ def api_send_to_bvc():
                     "payloads": payloads,
                 })
         except (ValidationError, ValueError) as e:
+            missing_notes = []
+            for v in vouchers:
+                v_no = v.get("voucher_number", "Invoice")
+                if not v.get("destination_account_id"):
+                    missing_notes.append(f"{v_no}: Destination Account ID is required")
+                if not v.get("destination_address_id"):
+                    missing_notes.append(f"{v_no}: Destination Address ID is required")
+            if missing_notes:
+                return jsonify({
+                    "error": "Cannot generate BVC payload because required destination details are missing:\n\n"
+                             + "\n".join(missing_notes)
+                             + "\n\nPlease enter the Destination Account ID and Address ID directly in the table row (or update the Party Ledger in Tally)."
+                }), 422
             return jsonify({"error": f"Validation failed in dry-run preview: {str(e)}"}), 422
 
     # 2. LIVE MODE: Verify credentials first

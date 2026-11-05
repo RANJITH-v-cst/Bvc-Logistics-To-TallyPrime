@@ -450,6 +450,20 @@
       text-align: center;
     }
 
+    .bvc-code-input {
+      padding: 0.25rem 0.45rem;
+      font-size: 0.8rem;
+      width: 140px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+    }
+
+    .bvc-code-input:focus {
+      border-color: var(--primary);
+    }
+
     /* Empty state */
     .empty-state {
       text-align: center;
@@ -814,11 +828,22 @@
           tr.className = "row-missing-data";
         }
 
-        // BVC Codes representation
+        // BVC Codes representation with editable fields
         const bvcCodes = `
-          <div><strong>Acc:</strong> ${v.destination_account_id || '<span style="color:#f87171;">MISSING</span>'}</div>
-          <div><strong>Addr:</strong> ${v.destination_address_id || '<span style="color:#f87171;">MISSING</span>'}</div>
-          ${v.destination_contact_shortcode ? `<div><small>Cont: ${v.destination_contact_shortcode}</small></div>` : ''}
+          <div style="display:flex; flex-direction:column; gap:0.25rem;">
+            <div style="display:flex; align-items:center; gap:0.3rem;">
+              <small style="color:var(--text-muted); width:32px;">Acc:</small>
+              <input type="text" class="bvc-code-input" value="${escapeHtml(v.destination_account_id || '')}" placeholder="Dest Account ID" onchange="updateDestAccount(${index}, this.value)">
+            </div>
+            <div style="display:flex; align-items:center; gap:0.3rem;">
+              <small style="color:var(--text-muted); width:32px;">Addr:</small>
+              <input type="text" class="bvc-code-input" value="${escapeHtml(v.destination_address_id || '')}" placeholder="Dest Address ID" onchange="updateDestAddress(${index}, this.value)">
+            </div>
+            <div style="display:flex; align-items:center; gap:0.3rem;">
+              <small style="color:var(--text-muted); width:32px;">Cont:</small>
+              <input type="text" class="bvc-code-input" value="${escapeHtml(v.destination_contact_shortcode || '')}" placeholder="Contact (opt)" onchange="updateDestContact(${index}, this.value)">
+            </div>
+          </div>
         `;
 
         // Missing fields info
@@ -895,6 +920,64 @@
       if (loadedVouchers[index]) {
         loadedVouchers[index].origin_address = val;
       }
+    }
+
+    function updateDestAccount(index, val) {
+      if (loadedVouchers[index]) {
+        loadedVouchers[index].destination_account_id = val.trim();
+        revalidateRow(index);
+      }
+    }
+
+    function updateDestAddress(index, val) {
+      if (loadedVouchers[index]) {
+        loadedVouchers[index].destination_address_id = val.trim();
+        revalidateRow(index);
+      }
+    }
+
+    function updateDestContact(index, val) {
+      if (loadedVouchers[index]) {
+        loadedVouchers[index].destination_contact_shortcode = val.trim();
+      }
+    }
+
+    function revalidateRow(index) {
+      const v = loadedVouchers[index];
+      if (!v) return;
+      const hasAcc = Boolean(v.destination_account_id && v.destination_account_id.trim());
+      const hasAddr = Boolean(v.destination_address_id && v.destination_address_id.trim());
+      const missing = [];
+      if (!hasAcc) missing.push("Destination_AccountID");
+      if (!hasAddr) missing.push("Destination_AddressID");
+
+      v.is_valid = (missing.length === 0);
+      v.missing_fields = missing;
+      if (v.status !== "Sent") {
+        v.status = v.is_valid ? "Pending" : "Missing data";
+      }
+
+      // Update the specific row's status badge & missing info in DOM without full reload
+      const tr = document.querySelector(`tr[data-index="${index}"]`);
+      if (tr) {
+        if (!v.is_valid) {
+          tr.className = "row-missing-data";
+        } else {
+          tr.classList.remove("row-missing-data");
+        }
+        const statusTd = tr.querySelector("td:nth-child(9)");
+        if (statusTd) {
+          let badgeClass = "badge-pending";
+          if (v.status === "Sent") badgeClass = "badge-sent";
+          else if (v.status === "Missing data") badgeClass = "badge-missing";
+          let missingHtml = "";
+          if (!v.is_valid && v.missing_fields.length > 0) {
+            missingHtml = `<div class="missing-info">Missing: ${v.missing_fields.join(", ")}</div>`;
+          }
+          statusTd.innerHTML = `<span class="badge-status ${badgeClass}">${v.status}</span>${missingHtml}`;
+        }
+      }
+      updateSelectionState();
     }
 
     function toggleSelectAll(checked) {
