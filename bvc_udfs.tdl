@@ -1,0 +1,57 @@
+;; =========================================================================
+;; TDL Definitions for BVC Logistics Integration with TallyPrime
+;; Defines UDFs for Party Ledgers and Sales Vouchers
+;; =========================================================================
+
+[System: UDF]
+    ;; Ledger Master UDFs (Destination Delivery Details)
+    BVCAccountID         : String : 10001
+    BVCAddressID         : String : 10002
+    BVCContactShortcode  : String : 10003
+
+    ;; Voucher UDFs (Shipment & Tracking Details)
+    BVCPackages          : Number : 10004
+    BVCOriginAddress     : String : 10005
+    BVCShipmentID        : String : 10006
+    BVCTrackingURL       : String : 10007
+    BVCLabelURL          : String : 10008
+    BVCSent              : String : 10009
+
+;; =========================================================================
+;; 1. Modify Party Ledger Master Screen
+;; =========================================================================
+[#Part: LED Other Details]
+    Add : Line : After : LED SubHeading : BVC Ledger Line
+
+[Line: BVC Ledger Line]
+    Field : Medium Prompt, BVC Ledger Acc Field, Short Prompt, BVC Ledger Addr Field
+    Local : Field : Medium Prompt : Set as : "BVC Account ID:"
+    Local : Field : Short Prompt  : Set as : "BVC Address ID:"
+
+[Field: BVC Ledger Acc Field]
+    Use     : Name Field
+    Storage : BVCAccountID
+
+[Field: BVC Ledger Addr Field]
+    Use     : Name Field
+    Storage : BVCAddressID
+
+;; =========================================================================
+;; 2. Modify Sales Voucher Screen
+;; =========================================================================
+[#Part: VCH Title]
+    Add : Line : After : Basic Info : BVC Voucher Info Line
+
+[Line: BVC Voucher Info Line]
+    Field : Short Prompt, BVC Pkg Field, Short Prompt, BVC Sent Status Field
+    Local : Field : Short Prompt : 1 : Set as : "Packages:"
+    Local : Field : Short Prompt : 2 : Set as : "BVC Sent:"
+
+[Field: BVC Pkg Field]
+    Use     : Number Field
+    Storage : BVCPackages
+
+[Field: BVC Sent Status Field]
+    Use     : String Field
+    Storage : BVCSent
+    Set Always : Yes
