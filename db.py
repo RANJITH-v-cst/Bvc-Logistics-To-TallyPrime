@@ -271,3 +271,4 @@ def get_all_shipments(limit: int = 100, db_path: Optional[str] = None) -> List[D
             (limit,),
         )
         return [dict(row) for row in cursor.fetchall()]
+

@@ -1,12 +1,13 @@
 """
 Flask application for tally-to-bvc middleware.
-Orchestrates Tally voucher retrieval, BVC shipment creation, write-back to Tally,
-and audit logging.
+Orchestrates Tally voucher retrieval, BVC shipment creation, and write-back to Tally.
+Stateless architecture: data is read directly from Tally and written back to Tally without a database.
 """
 
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any, Dict, List
 
 from flask import Flask, jsonify, render_template, request
@@ -14,14 +15,6 @@ from pydantic import ValidationError
 
 from bvc_client import BVCAPIError, BVCClient
 from config_loader import get_safe_config, load_raw_config
-from db import (
-    get_all_shipments,
-    get_recent_logs,
-    get_sent_vouchers_lookup,
-    get_shipment_by_voucher,
-    init_db,
-    save_shipment,
-)
 from mapper import (
     INVOICE_FIELD_MAPPING,
     build_v1_payload,
@@ -32,8 +25,40 @@ from tally_client import TallyClient, TallyClientError
 
 app = Flask(__name__)
 
-# Ensure database tables exist on startup
-init_db()
+# In-memory transient audit log for session inspection in the UI
+IN_MEMORY_LOGS: List[Dict[str, Any]] = []
+
+
+def record_audit_log(
+    endpoint: str,
+    voucher_numbers: Any,
+    http_status: Any,
+    request_body: Any,
+    response_body: Any,
+    is_success: bool,
+    error_message: Any = None,
+) -> None:
+    """Store recent API logs in memory for UI viewing (redacted)."""
+    now_str = datetime.now().isoformat()
+    if isinstance(voucher_numbers, list):
+        v_str = ", ".join(str(x) for x in voucher_numbers)
+    else:
+        v_str = str(voucher_numbers or "")
+
+    entry = {
+        "timestamp": now_str,
+        "endpoint": endpoint,
+        "voucher_numbers": v_str,
+        "http_status": http_status,
+        "request_body": request_body,
+        "response_body": response_body,
+        "response_preview": str(response_body)[:200] if response_body else "",
+        "is_success": is_success,
+        "error_message": error_message,
+    }
+    IN_MEMORY_LOGS.insert(0, entry)
+    if len(IN_MEMORY_LOGS) > 100:
+        IN_MEMORY_LOGS.pop()
 
 
 @app.route("/")
@@ -53,7 +78,6 @@ def api_status():
 
     tally_client = TallyClient(raw_cfg)
     tally_status = tally_client.check_connection()
-
     bvc_client = BVCClient(raw_cfg)
 
     return jsonify({
@@ -71,8 +95,8 @@ def api_status():
 @app.route("/api/vouchers", methods=["GET"])
 def api_get_vouchers():
     """
-    Fetch vouchers from Tally in given date range.
-    Enriches each voucher with DB status and validation details.
+    Fetch vouchers directly from Tally in given date range.
+    Stateless: Determines sent status and tracking details directly from Tally UDFs.
     """
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
@@ -98,16 +122,11 @@ def api_get_vouchers():
     except Exception as e:
         return jsonify({"error": f"Unexpected error reading from Tally: {str(e)}"}), 500
 
-    # Cross-reference with SQLite records
-    sent_set = get_sent_vouchers_lookup()
-
     enriched_vouchers = []
     for v in vouchers:
         v_num = v.get("voucher_number", "")
         v_type = v.get("voucher_type", voucher_type)
-
-        # Retrieve last known shipment from DB if any
-        db_record = get_shipment_by_voucher(v_num, v_type)
+        guid = v.get("guid", "")
 
         # Check validation
         is_valid, missing_fields = validate_voucher_for_bvc(
@@ -116,43 +135,20 @@ def api_get_vouchers():
             default_origin_address=default_origin_addr,
         )
 
-        # Check Sent status (either from DB or from Tally UDF)
-        is_sent_in_db = (v_num, v_type) in sent_set
-        is_sent_in_tally = str(v.get("voucher_sent_flag", "")).strip().lower() in ("yes", "1", "true")
-        is_sent = is_sent_in_db or is_sent_in_tally
+        # Sent status determined purely from Tally UDFs
+        sent_flag = str(v.get("voucher_sent_flag", "")).strip().lower()
+        shipment_id = str(v.get("voucher_shipment_id", "")).strip()
+        is_sent = sent_flag in ("yes", "1", "true") or bool(shipment_id)
 
-        # Determine display status
         if is_sent:
             status = "Sent"
-        elif db_record and db_record.get("status") == "FAILED":
-            status = "Failed"
         elif not is_valid:
             status = "Missing data"
         else:
             status = "Pending"
 
-        # Attach tracking details if available
-        shipment_id = (
-            v.get("voucher_shipment_id")
-            or (db_record.get("shipment_id") if db_record else "")
-        )
-        tracking_url = (
-            v.get("voucher_tracking_url")
-            or (db_record.get("tracking_url") if db_record else "")
-        )
-        label_url = (
-            v.get("voucher_label_url")
-            or (db_record.get("label_url") if db_record else "")
-        )
-
-        # Default packages if empty
         packages = v.get("packages") or 1
-
-        # Selected origin address
-        origin_address = (
-            v.get("voucher_origin_address")
-            or default_origin_addr
-        )
+        origin_address = v.get("voucher_origin_address") or default_origin_addr
 
         enriched_vouchers.append({
             "voucher_number": v_num,
@@ -160,7 +156,7 @@ def api_get_vouchers():
             "date": v.get("date", ""),
             "party_name": v.get("party_name", ""),
             "amount": v.get("amount", 0.0),
-            "guid": v.get("guid", ""),
+            "guid": guid,
             "packages": packages,
             "origin_account_id": default_origin_acc,
             "origin_address": origin_address,
@@ -171,9 +167,9 @@ def api_get_vouchers():
             "is_valid": is_valid,
             "missing_fields": missing_fields,
             "shipment_id": shipment_id,
-            "tracking_url": tracking_url,
-            "label_url": label_url,
-            "last_error": db_record.get("error_message") if db_record else None,
+            "tracking_url": v.get("voucher_tracking_url", ""),
+            "label_url": v.get("voucher_label_url", ""),
+            "last_error": None,
         })
 
     return jsonify({
@@ -234,9 +230,8 @@ def api_send_to_bvc():
     """
     Process selected vouchers:
     - Dry-run mode: returns payload without external calls.
-    - Live mode: sends to BVC, logs to SQLite, writes tracking details back to Tally.
-    - Per-row error handling: one failure does not halt the batch.
-    - Protects against duplicate sending unless force_resend is set.
+    - Live mode: sends to BVC and writes tracking details directly back to Tally.
+    - Stateless: no database required.
     """
     data = request.get_json() or {}
     vouchers = data.get("vouchers", [])
@@ -250,7 +245,7 @@ def api_send_to_bvc():
         return jsonify({"error": "No vouchers selected to send."}), 400
 
     raw_cfg = load_raw_config()
-    bvc_client = BVCClient(raw_cfg)
+    bvc_client = BVCClient(raw_cfg, log_callback=record_audit_log)
     tally_client = TallyClient(raw_cfg)
 
     # 1. DRY-RUN MODE: return generated payloads immediately
@@ -291,19 +286,20 @@ def api_send_to_bvc():
             "error": "BVC credentials (app_id / api_key) are missing in config.json or environment variables."
         }), 400
 
-    sent_set = get_sent_vouchers_lookup()
     results: List[Dict[str, Any]] = []
 
     # =========================================================================
     # V2 MODE: Multiple invoices consolidated into ONE shipment
     # =========================================================================
     if is_v2:
-        # Check if any voucher is already sent
         to_process = []
         for v in vouchers:
             v_num = v.get("voucher_number", "")
-            v_type = v.get("voucher_type", "Sales")
-            if (v_num, v_type) in sent_set and not force_resend:
+            sent_flag = str(v.get("voucher_sent_flag", "")).strip().lower()
+            ship_id = str(v.get("voucher_shipment_id", "")).strip()
+            is_already_sent = sent_flag in ("yes", "1", "true") or bool(ship_id)
+
+            if is_already_sent and not force_resend:
                 results.append({
                     "voucher_number": v_num,
                     "status": "SKIPPED",
@@ -328,40 +324,20 @@ def api_send_to_bvc():
             tracking_url = resp.get("tracking_url", "")
             label_url = resp.get("shipping_label_pdf", "")
 
-            # Update each voucher in DB and Tally
+            # Write tracking info back to each Tally voucher
             for v in to_process:
                 v_num = v.get("voucher_number", "")
-                v_type = v.get("voucher_type", "Sales")
                 v_date = v.get("date", "")
+                v_guid = v.get("guid", "")
 
-                save_shipment(
-                    voucher_number=v_num,
-                    voucher_type=v_type,
-                    status="SENT",
-                    voucher_date=v_date,
-                    party_name=v.get("party_name"),
-                    amount=v.get("amount"),
-                    packages=v.get("packages"),
-                    origin_account_id=origin_account_id,
-                    origin_address_id=origin_address_id,
-                    destination_account_id=v.get("destination_account_id"),
-                    destination_address_id=v.get("destination_address_id"),
-                    shipment_id=shipment_id,
-                    tracking_url=tracking_url,
-                    label_url=label_url,
-                    bvc_version="V2",
-                    request_payload=payload,
-                    response_payload=resp,
-                )
-
-                # Write back into Tally
                 tally_ok, tally_msg = tally_client.alter_voucher_with_bvc_details(
                     voucher_number=v_num,
                     voucher_date=v_date,
-                    voucher_type=v_type,
+                    voucher_type=v.get("voucher_type", "Sales"),
                     shipment_id=shipment_id,
                     tracking_url=tracking_url,
                     label_url=label_url,
+                    guid=v_guid,
                 )
 
                 results.append({
@@ -377,20 +353,8 @@ def api_send_to_bvc():
         except (ValidationError, ValueError, BVCAPIError) as e:
             err_msg = str(e)
             for v in to_process:
-                v_num = v.get("voucher_number", "")
-                v_type = v.get("voucher_type", "Sales")
-                save_shipment(
-                    voucher_number=v_num,
-                    voucher_type=v_type,
-                    status="FAILED",
-                    voucher_date=v.get("date"),
-                    party_name=v.get("party_name"),
-                    amount=v.get("amount"),
-                    error_message=err_msg,
-                    bvc_version="V2",
-                )
                 results.append({
-                    "voucher_number": v_num,
+                    "voucher_number": v.get("voucher_number", ""),
                     "status": "FAILED",
                     "error": err_msg,
                 })
@@ -404,10 +368,15 @@ def api_send_to_bvc():
         v_num = v.get("voucher_number", "")
         v_type = v.get("voucher_type", "Sales")
         v_date = v.get("date", "")
+        v_guid = v.get("guid", "")
         v_addr = v.get("origin_address") or origin_address_id
 
-        # Skip if already sent and not forcing resend
-        if (v_num, v_type) in sent_set and not force_resend:
+        sent_flag = str(v.get("voucher_sent_flag", "")).strip().lower()
+        ship_id = str(v.get("voucher_shipment_id", "")).strip()
+        is_already_sent = sent_flag in ("yes", "1", "true") or bool(ship_id)
+
+        # Skip if already marked sent in Tally and not forcing resend
+        if is_already_sent and not force_resend:
             results.append({
                 "voucher_number": v_num,
                 "status": "SKIPPED",
@@ -416,42 +385,19 @@ def api_send_to_bvc():
             continue
 
         try:
-            # Build and validate V1 payload
             payload = build_v1_payload(
                 voucher=v,
                 origin_account_id=origin_account_id,
                 origin_address_id=v_addr,
             )
 
-            # Call BVC API
             resp = bvc_client.create_shipment(payload, voucher_number=v_num)
 
             shipment_id = resp.get("shipment_id", "")
             tracking_url = resp.get("tracking_url", "")
             label_url = resp.get("shipping_label_pdf", "")
 
-            # Save success record in SQLite
-            save_shipment(
-                voucher_number=v_num,
-                voucher_type=v_type,
-                status="SENT",
-                voucher_date=v_date,
-                party_name=v.get("party_name"),
-                amount=v.get("amount"),
-                packages=v.get("packages"),
-                origin_account_id=origin_account_id,
-                origin_address_id=v_addr,
-                destination_account_id=v.get("destination_account_id"),
-                destination_address_id=v.get("destination_address_id"),
-                shipment_id=shipment_id,
-                tracking_url=tracking_url,
-                label_url=label_url,
-                bvc_version="V1",
-                request_payload=payload,
-                response_payload=resp,
-            )
-
-            # Write tracking info back to Tally voucher
+            # Write tracking info back to Tally voucher immediately
             tally_ok, tally_msg = tally_client.alter_voucher_with_bvc_details(
                 voucher_number=v_num,
                 voucher_date=v_date,
@@ -459,6 +405,7 @@ def api_send_to_bvc():
                 shipment_id=shipment_id,
                 tracking_url=tracking_url,
                 label_url=label_url,
+                guid=v_guid,
             )
 
             results.append({
@@ -473,17 +420,6 @@ def api_send_to_bvc():
 
         except (ValidationError, ValueError, BVCAPIError) as e:
             err_msg = str(e)
-            save_shipment(
-                voucher_number=v_num,
-                voucher_type=v_type,
-                status="FAILED",
-                voucher_date=v_date,
-                party_name=v.get("party_name"),
-                amount=v.get("amount"),
-                error_message=err_msg,
-                bvc_version="V1",
-            )
-            # Per-row error handling: record failure, continue loop!
             results.append({
                 "voucher_number": v_num,
                 "status": "FAILED",
@@ -491,14 +427,6 @@ def api_send_to_bvc():
             })
         except Exception as e:
             err_msg = f"Unexpected failure: {str(e)}"
-            save_shipment(
-                voucher_number=v_num,
-                voucher_type=v_type,
-                status="FAILED",
-                voucher_date=v_date,
-                error_message=err_msg,
-                bvc_version="V1",
-            )
             results.append({
                 "voucher_number": v_num,
                 "status": "FAILED",
@@ -510,16 +438,8 @@ def api_send_to_bvc():
 
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
-    """Return recent API logs for audit UI."""
-    logs = get_recent_logs(limit=100)
-    return jsonify({"logs": logs})
-
-
-@app.route("/api/shipments", methods=["GET"])
-def api_shipments():
-    """Return past shipment records."""
-    shipments = get_all_shipments(limit=100)
-    return jsonify({"shipments": shipments})
+    """Return in-memory transient API logs for session audit UI."""
+    return jsonify({"logs": IN_MEMORY_LOGS})
 
 
 @app.route("/api/tracking/refresh", methods=["POST"])

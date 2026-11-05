@@ -1,17 +1,16 @@
 """
 BVC Logistics API client (BVC Universe API).
-Handles authentication, request transmission, error parsing, and audit logging.
+Handles authentication, request transmission, and error parsing.
 Ensures API secrets are never logged or exposed in responses.
+Stateless: no database required.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 from config_loader import load_raw_config
-from db import log_api_call
 
 
 class BVCAPIError(Exception):
@@ -25,7 +24,11 @@ class BVCAPIError(Exception):
 class BVCClient:
     """Client for BVC Logistics Universe REST API."""
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        log_callback: Optional[Callable[..., None]] = None,
+    ):
         raw_cfg = config or load_raw_config()
         self.bvc_cfg = raw_cfg.get("bvc", {})
         self.base_url = self.bvc_cfg.get("base_url", "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI").rstrip("/")
@@ -34,6 +37,7 @@ class BVCClient:
         self.app_id = self.bvc_cfg.get("app_id", "").strip()
         self.api_key = self.bvc_cfg.get("api_key", "").strip()
         self.timeout = int(self.bvc_cfg.get("timeout_seconds", 30))
+        self.log_callback = log_callback
 
     def is_configured(self) -> bool:
         """Check if API credentials are present."""
@@ -47,22 +51,12 @@ class BVCClient:
             "X-Contacts-Key": self.api_key,
         }
 
-    def _redact_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
-        """Return a copy of headers with secrets masked."""
-        safe = dict(headers)
-        if "X-Contacts-AppId" in safe:
-            safe["X-Contacts-AppId"] = "[REDACTED]"
-        if "X-Contacts-Key" in safe:
-            safe["X-Contacts-Key"] = "[REDACTED]"
-        return safe
-
     def _parse_bvc_response(self, resp_data: Any, status_code: int) -> Tuple[bool, Dict[str, Any], Optional[str]]:
         """
         Inspect BVC response data for success or error flags.
         Extracts ShippingLabelPDF, TrackingUrl, and ShipmentID/AWB.
         Returns: (is_success, extracted_dict, error_message)
         """
-        # If response is non-2xx
         if status_code < 200 or status_code >= 300:
             err = f"BVC HTTP {status_code}"
             if isinstance(resp_data, dict):
@@ -73,7 +67,6 @@ class BVCClient:
                 err += f": {resp_data[:200]}"
             return False, {}, err
 
-        # If 2xx but JSON contains explicit error flags
         data = resp_data
         if isinstance(resp_data, list) and len(resp_data) > 0:
             data = resp_data[0]
@@ -81,7 +74,6 @@ class BVCClient:
         if not isinstance(data, dict):
             return True, {"raw": resp_data}, None
 
-        # Check common error indicators
         status_flag = str(data.get("Status") or data.get("status") or "").upper()
         is_success_flag = data.get("IsSuccess") if "IsSuccess" in data else data.get("isSuccess")
         error_field = data.get("Error") or data.get("error") or data.get("ErrorMessage") or data.get("errorMessage")
@@ -90,7 +82,6 @@ class BVCClient:
             err_msg = str(error_field or data.get("Message") or data.get("message") or f"BVC reported status: {status_flag}")
             return False, data, err_msg
 
-        # Extract URLs and IDs safely (case-insensitive checks)
         shipping_label = (
             data.get("ShippingLabelPDF")
             or data.get("shippingLabelPDF")
@@ -134,7 +125,6 @@ class BVCClient:
     ) -> Dict[str, Any]:
         """
         Call BVC CreateShipments (V1) endpoint for a single invoice.
-        Logs to SQLite audit log (with secrets redacted).
         """
         if not self.is_configured():
             raise BVCAPIError("BVC API credentials (app_id or api_key) are missing in configuration.")
@@ -158,16 +148,16 @@ class BVCClient:
 
             is_success, extracted, error_msg = self._parse_bvc_response(resp_json, status_code)
 
-            # Audit log into SQLite
-            log_api_call(
-                endpoint=self.create_shipment_path,
-                voucher_numbers=v_num,
-                http_status=status_code,
-                request_body=payload,
-                response_body=resp_json,
-                is_success=is_success,
-                error_message=error_msg,
-            )
+            if self.log_callback:
+                self.log_callback(
+                    endpoint=self.create_shipment_path,
+                    voucher_numbers=v_num,
+                    http_status=status_code,
+                    request_body=payload,
+                    response_body=resp_json,
+                    is_success=is_success,
+                    error_message=error_msg,
+                )
 
             if not is_success:
                 raise BVCAPIError(
@@ -180,15 +170,16 @@ class BVCClient:
 
         except requests.exceptions.RequestException as e:
             err_msg = f"Network error connecting to BVC API: {str(e)}"
-            log_api_call(
-                endpoint=self.create_shipment_path,
-                voucher_numbers=v_num,
-                http_status=None,
-                request_body=payload,
-                response_body=None,
-                is_success=False,
-                error_message=err_msg,
-            )
+            if self.log_callback:
+                self.log_callback(
+                    endpoint=self.create_shipment_path,
+                    voucher_numbers=v_num,
+                    http_status=None,
+                    request_body=payload,
+                    response_body=None,
+                    is_success=False,
+                    error_message=err_msg,
+                )
             raise BVCAPIError(err_msg, status_code=None, raw_response=str(e))
 
     def create_shipment_v2(
@@ -221,15 +212,16 @@ class BVCClient:
 
             is_success, extracted, error_msg = self._parse_bvc_response(resp_json, status_code)
 
-            log_api_call(
-                endpoint=self.create_shipment_v2_path,
-                voucher_numbers=v_nums,
-                http_status=status_code,
-                request_body=payload,
-                response_body=resp_json,
-                is_success=is_success,
-                error_message=error_msg,
-            )
+            if self.log_callback:
+                self.log_callback(
+                    endpoint=self.create_shipment_v2_path,
+                    voucher_numbers=v_nums,
+                    http_status=status_code,
+                    request_body=payload,
+                    response_body=resp_json,
+                    is_success=is_success,
+                    error_message=error_msg,
+                )
 
             if not is_success:
                 raise BVCAPIError(
@@ -242,15 +234,16 @@ class BVCClient:
 
         except requests.exceptions.RequestException as e:
             err_msg = f"Network error connecting to BVC API V2: {str(e)}"
-            log_api_call(
-                endpoint=self.create_shipment_v2_path,
-                voucher_numbers=v_nums,
-                http_status=None,
-                request_body=payload,
-                response_body=None,
-                is_success=False,
-                error_message=err_msg,
-            )
+            if self.log_callback:
+                self.log_callback(
+                    endpoint=self.create_shipment_v2_path,
+                    voucher_numbers=v_nums,
+                    http_status=None,
+                    request_body=payload,
+                    response_body=None,
+                    is_success=False,
+                    error_message=err_msg,
+                )
             raise BVCAPIError(err_msg, status_code=None, raw_response=str(e))
 
     def tracking_refresh(self, shipment_id: str) -> Dict[str, Any]:
@@ -258,7 +251,6 @@ class BVCClient:
         Stub for the Get Tracking Details API.
         # TODO: Implement once BVC Get Tracking Details API documentation is provided.
         """
-        # Place documentation or parameters here once available
         return {
             "status": "pending_documentation",
             "shipment_id": shipment_id,

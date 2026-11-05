@@ -13,6 +13,11 @@ ENV/
 # Database & local state
 *.db
 *.sqlite3
+debug/
+
+# Reference repositories
+chirix_ref/
+advent_ref/
 
 # Configuration with credentials
 config.json
@@ -25,3 +30,4 @@ htmlcov/
 # IDE files
 .vscode/
 .idea/
+

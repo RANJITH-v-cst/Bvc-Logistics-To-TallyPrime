@@ -243,3 +243,4 @@ INVOICE_FIELD_MAPPING = {
 Each sent invoice displays a **Tracking** button that opens the direct tracking URL provided by BVC. 
 
 A stub method `tracking_refresh(shipment_id)` is provided in `bvc_client.py` and connected to `/api/tracking/refresh` to facilitate immediate integration once BVC publishes the Get Tracking Details API documentation.
+

@@ -220,6 +220,9 @@ def build_v1_payload(
         voucher.get("origin_contact_shortcode")
         or voucher.get("Origin_Contact_Shortcode")
     )
+    # Auto-resolve contact shortcode based on origin address (e.g. SJ-1 -> SJ-1, SJ-2 -> SJ-2)
+    if not origin_contact and origin_address_id:
+        origin_contact = str(origin_address_id).strip()
     dest_contact = (
         voucher.get("destination_contact_shortcode")
         or voucher.get("ledger_contact")
@@ -287,6 +290,9 @@ def build_v2_payload(
         first_voucher.get("origin_contact_shortcode")
         or first_voucher.get("Origin_Contact_Shortcode")
     )
+    # Auto-resolve contact shortcode based on origin address (e.g. SJ-1 -> SJ-1, SJ-2 -> SJ-2)
+    if not origin_contact and origin_address_id:
+        origin_contact = str(origin_address_id).strip()
     dest_contact = (
         first_voucher.get("destination_contact_shortcode")
         or first_voucher.get("ledger_contact")

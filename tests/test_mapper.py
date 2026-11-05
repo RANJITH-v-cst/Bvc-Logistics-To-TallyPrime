@@ -153,3 +153,4 @@ def test_build_v2_payload(sample_valid_voucher):
     assert len(payload["Invoices"]) == 2
     assert payload["Invoices"][0]["InvoiceNo"] == "INV-2026-001"
     assert payload["Invoices"][1]["InvoiceNo"] == "INV-2026-002"
+

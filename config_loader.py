@@ -106,3 +106,4 @@ def get_safe_config() -> Dict[str, Any]:
         "bvc": bvc_copy,
         "udf": cfg.get("udf", {}),
     }
+

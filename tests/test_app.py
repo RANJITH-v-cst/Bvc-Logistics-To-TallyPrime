@@ -1,27 +1,19 @@
 """
 Integration tests for Flask routes in app.py.
-Tests /api/status, /api/preview, /api/send (dry-run & mock live), duplicate handling, and logs.
+Tests stateless Tally flow: /api/status, /api/preview, /api/send, and logs.
 """
 
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import pytest
 
 from app import app
-from db import init_db, get_connection
 
 
 @pytest.fixture
-def client(tmp_path):
-    # Set up a test database in a temporary folder
-    test_db = str(tmp_path / "test_tally_bvc.db")
-    init_db(test_db)
-
+def client():
     app.config["TESTING"] = True
     with app.test_client() as client:
-        with patch("app.init_db", return_value=None), \
-             patch("db.get_db_path", return_value=test_db):
-            yield client
+        yield client
 
 
 def test_index_route(client):
@@ -101,18 +93,18 @@ def test_api_send_dry_run(client):
     assert "DRY-RUN ON" in data["message"]
 
 
-def test_api_send_live_success_and_duplicate_prevention(client):
+def test_api_send_live_success_and_tally_alter(client):
     sample_voucher = {
         "voucher_number": "VCH-103",
         "date": "2026-04-01",
         "party_name": "Party Live",
         "amount": 99000.0,
+        "guid": "guid-test-103",
         "destination_account_id": "DEST-ACC",
         "destination_address_id": "DEST-ADDR",
         "packages": 1,
     }
 
-    # Mock BVC client and Tally write-back
     with patch("bvc_client.BVCClient.is_configured", return_value=True), \
          patch("bvc_client.BVCClient.create_shipment") as mock_bvc, \
          patch("tally_client.TallyClient.alter_voucher_with_bvc_details") as mock_tally_alter:
@@ -125,7 +117,6 @@ def test_api_send_live_success_and_duplicate_prevention(client):
         }
         mock_tally_alter.return_value = (True, "Voucher updated successfully in Tally")
 
-        # 1. First send (Live)
         resp = client.post(
             "/api/send",
             json={
@@ -143,36 +134,34 @@ def test_api_send_live_success_and_duplicate_prevention(client):
         assert res_data[0]["shipment_id"] == "BVC-TRACK-999"
         assert res_data[0]["tally_writeback"] is True
 
-        # 2. Second send WITHOUT force_resend -> Should be SKIPPED
-        resp2 = client.post(
-            "/api/send",
-            json={
-                "vouchers": [sample_voucher],
-                "origin_account_id": "SJ",
-                "origin_address_id": "SJ-1",
-                "dry_run": False,
-                "force_resend": False,
-            },
-        )
-        res_data2 = resp2.get_json()["results"]
-        assert len(res_data2) == 1
-        assert res_data2[0]["status"] == "SKIPPED"
-        assert "Already sent" in res_data2[0]["message"]
 
-        # 3. Third send WITH force_resend = True -> Should resend
-        resp3 = client.post(
-            "/api/send",
-            json={
-                "vouchers": [sample_voucher],
-                "origin_account_id": "SJ",
-                "origin_address_id": "SJ-1",
-                "dry_run": False,
-                "force_resend": True,
-            },
-        )
-        res_data3 = resp3.get_json()["results"]
-        assert len(res_data3) == 1
-        assert res_data3[0]["status"] == "SENT"
+def test_api_send_already_sent_skipped_in_tally(client):
+    already_sent_voucher = {
+        "voucher_number": "VCH-SENT",
+        "date": "2026-04-01",
+        "voucher_sent_flag": "Yes",
+        "voucher_shipment_id": "BVC-ALREADY-123",
+        "destination_account_id": "DEST-ACC",
+        "destination_address_id": "DEST-ADDR",
+        "packages": 1,
+    }
+
+    # Should be skipped without force_resend
+    resp = client.post(
+        "/api/send",
+        json={
+            "vouchers": [already_sent_voucher],
+            "origin_account_id": "SJ",
+            "origin_address_id": "SJ-1",
+            "dry_run": False,
+            "force_resend": False,
+        },
+    )
+    assert resp.status_code == 200
+    res = resp.get_json()["results"]
+    assert len(res) == 1
+    assert res[0]["status"] == "SKIPPED"
+    assert "Already sent" in res[0]["message"]
 
 
 def test_api_send_per_row_error_handling(client):
@@ -221,12 +210,12 @@ def test_api_send_per_row_error_handling(client):
         assert resp.status_code == 200
         results = resp.get_json()["results"]
         assert len(results) == 2
-        # First row failed, but did not stop the batch!
+        # First row failed, but did not stop the batch
         assert results[0]["voucher_number"] == "VCH-FAIL"
         assert results[0]["status"] == "FAILED"
         assert "Invalid Pincode" in results[0]["error"]
 
-        # Second row succeeded!
+        # Second row succeeded
         assert results[1]["voucher_number"] == "VCH-OK"
         assert results[1]["status"] == "SENT"
         assert results[1]["shipment_id"] == "BVC-OK-123"
