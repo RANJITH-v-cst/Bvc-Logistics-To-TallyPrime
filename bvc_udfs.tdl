@@ -1,58 +1,135 @@
 ;; =========================================================================
 ;; TDL Definitions for BVC Logistics Integration with TallyPrime
-;; Defines UDFs for Party Ledgers and Sales Vouchers
+;; Strict TDL Hierarchy: Report -> Form -> Part -> Line -> Field
+;; Never attach a Field directly to a Part. It must go through a Line.
 ;; =========================================================================
 
 [System: UDF]
-    ;; Ledger Master UDFs (Destination Delivery Details)
-    BVCAccountID         : String : 10001
-    BVCAddressID         : String : 10002
-    BVCContactShortcode  : String : 10003
+    ;; Destination Delivery Details (Used on Voucher and Party Ledger)
+    BVCDestAccountID         : String  : 11001
+    BVCDestAddressID         : String  : 11002
+    BVCDestContactShortcode  : String  : 11003
 
-    ;; Voucher UDFs (Shipment & Tracking Details)
-    BVCPackages          : Number : 10004
-    BVCOriginAddress     : String : 10005
-    BVCShipmentID        : String : 10006
-    BVCTrackingURL       : String : 10007
-    BVCLabelURL          : String : 10008
-    BVCSent              : String : 10009
+    ;; Voucher Specific Shipment Details
+    BVCNoOfPackages          : String  : 11004
+    BVCNetWeightGm           : String  : 11005
+    BVCGrossWeightKg         : String  : 11006
+    BVCService               : String  : 11007
+    BVCInsurance             : String  : 11008
+    BVCRemarks               : String  : 11009
+
+    ;; BVC Shipment Response & Tracking Details
+    BVCShipmentNo            : String  : 11010
+    BVCStatus                : String  : 11011
+    BVCSentOn                : String  : 11012
 
 ;; =========================================================================
 ;; 1. Modify Party Ledger Master Screen
 ;; =========================================================================
 [#Part: LED Other Details]
-    Add : Line : After : LED SubHeading : BVC Ledger Line
+    Add : Line : After : LED SubHeading : BVC Party Dest Line 1, BVC Party Dest Line 2
 
-[Line: BVC Ledger Line]
+[Line: BVC Party Dest Line 1]
     Field : Medium Prompt, BVC Ledger Acc Field, Short Prompt, BVC Ledger Addr Field
     Local : Field : Medium Prompt : Set as : "BVC Account ID:"
     Local : Field : Short Prompt  : Set as : "BVC Address ID:"
 
 [Field: BVC Ledger Acc Field]
     Use     : Name Field
-    Storage : BVCAccountID
+    Storage : BVCDestAccountID
+    Width   : 20
 
 [Field: BVC Ledger Addr Field]
     Use     : Name Field
-    Storage : BVCAddressID
+    Storage : BVCDestAddressID
+    Width   : 20
+
+[Line: BVC Party Dest Line 2]
+    Field : Medium Prompt, BVC Ledger Contact Field
+    Local : Field : Medium Prompt : Set as : "BVC Contact Code:"
+
+[Field: BVC Ledger Contact Field]
+    Use     : Name Field
+    Storage : BVCDestContactShortcode
+    Width   : 20
 
 ;; =========================================================================
 ;; 2. Modify Sales Voucher Screen
 ;; =========================================================================
 [#Part: VCH Title]
-    Add : Line : After : Basic Info : BVC Voucher Info Line
+    Add : Line : After : Basic Info : BVC VCH Dest Line, BVC VCH Pkg Line, BVC VCH Status Line
 
-[Line: BVC Voucher Info Line]
-    Field : Short Prompt, BVC Pkg Field, Short Prompt, BVC Sent Status Field
-    Local : Field : Short Prompt : 1 : Set as : "Packages:"
-    Local : Field : Short Prompt : 2 : Set as : "BVC Sent:"
+;; Line: Destination Overrides
+[Line: BVC VCH Dest Line]
+    Field : Short Prompt, BVC VCH Dest Acc Field, Short Prompt, BVC VCH Dest Addr Field, Short Prompt, BVC VCH Dest Contact Field
+    Local : Field : Short Prompt : 1 : Set as : "BVC Acc:"
+    Local : Field : Short Prompt : 2 : Set as : "BVC Addr:"
+    Local : Field : Short Prompt : 3 : Set as : "BVC Cont:"
 
-[Field: BVC Pkg Field]
-    Use     : Number Field
-    Storage : BVCPackages
+[Field: BVC VCH Dest Acc Field]
+    Use     : Name Field
+    Storage : BVCDestAccountID
+    Width   : 14
 
-[Field: BVC Sent Status Field]
-    Use     : String Field
-    Storage : BVCSent
+[Field: BVC VCH Dest Addr Field]
+    Use     : Name Field
+    Storage : BVCDestAddressID
+    Width   : 14
+
+[Field: BVC VCH Dest Contact Field]
+    Use     : Name Field
+    Storage : BVCDestContactShortcode
+    Width   : 14
+
+;; Line: Packages, Weights, Service, Remarks
+[Line: BVC VCH Pkg Line]
+    Field : Short Prompt, BVC VCH Pkg Field, Short Prompt, BVC VCH Net Wt Field, Short Prompt, BVC VCH Gross Wt Field, Short Prompt, BVC VCH Service Field
+    Local : Field : Short Prompt : 1 : Set as : "Pkgs:"
+    Local : Field : Short Prompt : 2 : Set as : "Net(g):"
+    Local : Field : Short Prompt : 3 : Set as : "Gross(kg):"
+    Local : Field : Short Prompt : 4 : Set as : "Service:"
+
+[Field: BVC VCH Pkg Field]
+    Use     : Name Field
+    Storage : BVCNoOfPackages
+    Width   : 8
+
+[Field: BVC VCH Net Wt Field]
+    Use     : Name Field
+    Storage : BVCNetWeightGm
+    Width   : 10
+
+[Field: BVC VCH Gross Wt Field]
+    Use     : Name Field
+    Storage : BVCGrossWeightKg
+    Width   : 10
+
+[Field: BVC VCH Service Field]
+    Use     : Name Field
+    Storage : BVCService
+    Width   : 12
+
+;; Line: BVC Shipment Status, Shipment No, Sent Date
+[Line: BVC VCH Status Line]
+    Field : Short Prompt, BVC VCH Ship No Field, Short Prompt, BVC VCH Status Field, Short Prompt, BVC VCH Sent On Field
+    Local : Field : Short Prompt : 1 : Set as : "BVC Ship#:"
+    Local : Field : Short Prompt : 2 : Set as : "Status:"
+    Local : Field : Short Prompt : 3 : Set as : "Sent On:"
+
+[Field: BVC VCH Ship No Field]
+    Use        : Name Field
+    Storage    : BVCShipmentNo
+    Width      : 18
     Set Always : Yes
 
+[Field: BVC VCH Status Field]
+    Use        : Name Field
+    Storage    : BVCStatus
+    Width      : 20
+    Set Always : Yes
+
+[Field: BVC VCH Sent On Field]
+    Use        : Name Field
+    Storage    : BVCSentOn
+    Width      : 20
+    Set Always : Yes

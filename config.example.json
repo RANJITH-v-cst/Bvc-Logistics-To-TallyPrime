@@ -1,29 +1,23 @@
 {
   "tally": {
-    "host": "127.0.0.1",
+    "host": "localhost",
     "port": 9000,
-    "company": ""
+    "companyName": ""
   },
   "bvc": {
-    "base_url": "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI",
-    "create_shipment_path": "/CreateShipments",
-    "create_shipment_v2_path": "/CreateShipment/V2",
-    "app_id": "",
-    "api_key": "",
-    "origin_account_id": "SJ",
-    "origin_addresses": ["SJ-1", "SJ-2"],
-    "timeout_seconds": 30
+    "baseUrl": "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI",
+    "appId": "YOUR_BVC_APP_ID",
+    "appKey": "YOUR_BVC_APP_KEY",
+    "createShipmentUrl": "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI/CreateShipments",
+    "createAddressUrl": "TODO",
+    "trackingUrl": "TODO",
+    "shipmentNoJsonPath": "Shipment_Number"
   },
-  "udf": {
-    "ledger_account": "BVCAccountID",
-    "ledger_address": "BVCAddressID",
-    "ledger_contact": "BVCContactShortcode",
-    "voucher_packages": "BVCPackages",
-    "voucher_origin_address": "BVCOriginAddress",
-    "voucher_shipment_id": "BVCShipmentID",
-    "voucher_tracking_url": "BVCTrackingURL",
-    "voucher_label_url": "BVCLabelURL",
-    "voucher_sent_flag": "BVCSent"
+  "defaults": {
+    "originAccountId": "SJ",
+    "originAddressId": "SJ-1",
+    "originContactShortcode": "SJ-1",
+    "bvcService": "GoldSHIP",
+    "insuranceByBvc": "No"
   }
 }
-

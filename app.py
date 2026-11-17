@@ -1,487 +1,414 @@
 """
-Flask application for tally-to-bvc middleware.
-Orchestrates Tally voucher retrieval, BVC shipment creation, and write-back to Tally.
-Stateless architecture: data is read directly from Tally and written back to Tally without a database.
+FastAPI Middleware Service: TallyPrime to BVC Logistics (BVC Universe API).
+Pushes Sales Invoices to BVC to create shipments and writes the shipment number back to Tally.
 """
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
 
-from flask import Flask, jsonify, render_template, request
-from pydantic import ValidationError
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse
 
-from bvc_client import BVCAPIError, BVCClient
-from config_loader import get_safe_config, load_raw_config
-from mapper import (
-    INVOICE_FIELD_MAPPING,
-    build_v1_payload,
-    build_v2_payload,
-    validate_voucher_for_bvc,
+from bvc_service import (
+    build_bvc_shipment_payload,
+    call_bvc_create_shipment,
+    call_bvc_tracking,
+    extract_shipment_number,
 )
-from tally_client import TallyClient, TallyClientError
+from config_manager import get_safe_config, load_config
+from logger_util import LOGGER
+from tally_service import get_tally_sales_voucher, write_tally_voucher_status
 
-app = Flask(__name__)
+app = FastAPI(
+    title="Tally to BVC Logistics Middleware",
+    description="Syncs TallyPrime Sales Invoices to BVC Logistics Universe API and writes back shipment numbers.",
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url=None,  # Handled with custom resilient CDN URL below
+)
 
-# In-memory transient audit log for session inspection in the UI
-IN_MEMORY_LOGS: List[Dict[str, Any]] = []
+# Enable CORS for potential web dashboard or local browser calls
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-def record_audit_log(
-    endpoint: str,
-    voucher_numbers: Any,
-    http_status: Any,
-    request_body: Any,
-    response_body: Any,
-    is_success: bool,
-    error_message: Any = None,
-) -> None:
-    """Store recent API logs in memory for UI viewing (redacted)."""
-    now_str = datetime.now().isoformat()
-    if isinstance(voucher_numbers, list):
-        v_str = ", ".join(str(x) for x in voucher_numbers)
-    else:
-        v_str = str(voucher_numbers or "")
+@app.get("/redoc", include_in_schema=False)
+def redoc_custom():
+    """Render ReDoc using resilient CDN bundle with fallback."""
+    return get_redoc_html(
+        openapi_url="/openapi.json",
+        title="Tally to BVC Logistics Middleware - ReDoc",
+        redoc_js_url="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js",
+    )
 
-    entry = {
-        "timestamp": now_str,
-        "endpoint": endpoint,
-        "voucher_numbers": v_str,
-        "http_status": http_status,
-        "request_body": request_body,
-        "response_body": response_body,
-        "response_preview": str(response_body)[:200] if response_body else "",
-        "is_success": is_success,
-        "error_message": error_message,
+
+@app.get("/ui", response_class=HTMLResponse)
+def interactive_ui():
+    """Zero-dependency interactive Web Console for pushing and tracking invoices directly."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>BVC Logistics Middleware Console</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; max-width: 800px; margin: 0 auto; }
+    h1 { color: #38bdf8; font-size: 1.6rem; margin-bottom: 0.5rem; }
+    p.sub { color: #94a3b8; margin-bottom: 2rem; font-size: 0.95rem; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }
+    .card h2 { font-size: 1.2rem; color: #f1f5f9; margin-bottom: 1rem; border-bottom: 1px solid #334155; padding-bottom: 0.5rem; }
+    .form-group { margin-bottom: 1rem; }
+    label { display: block; font-size: 0.85rem; color: #cbd5e1; margin-bottom: 0.3rem; font-weight: 600; }
+    input[type="text"], input[type="date"] { width: 100%; padding: 0.6rem; background: #0f172a; border: 1px solid #475569; border-radius: 4px; color: #fff; font-size: 0.95rem; box-sizing: border-box; }
+    .checkbox-group { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+    button { background: #0284c7; color: #fff; border: none; padding: 0.7rem 1.2rem; font-size: 0.95rem; border-radius: 5px; cursor: pointer; font-weight: 600; }
+    button:hover { background: #0369a1; }
+    button.secondary { background: #475569; }
+    button.secondary:hover { background: #334155; }
+    pre { background: #090d16; border: 1px solid #334155; padding: 1rem; border-radius: 6px; overflow-x: auto; color: #38bdf8; font-family: Consolas, monospace; font-size: 0.9rem; min-height: 80px; }
+    .badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }
+    .badge-ok { background: #15803d; color: #dcfce7; }
+    .badge-err { background: #b91c1c; color: #fee2e2; }
+    .links { display: flex; gap: 1rem; margin-top: 1rem; font-size: 0.85rem; }
+    .links a { color: #38bdf8; text-decoration: none; }
+    .links a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Tally to BVC Logistics Middleware</h1>
+  <p class="sub">Test sales invoice push and tracking directly from your browser.</p>
+
+  <div class="card">
+    <h2>1. Push Sales Invoice to BVC</h2>
+    <div class="form-group">
+      <label>Voucher Number (vchno):</label>
+      <input type="text" id="push_vchno" placeholder="e.g. 1 or INV-001" value="1">
+    </div>
+    <div class="form-group">
+      <label>Voucher Date (YYYYMMDD or YYYY-MM-DD, optional):</label>
+      <input type="text" id="push_date" placeholder="e.g. 20261117 (leave empty to read from Tally)">
+    </div>
+    <div class="checkbox-group">
+      <input type="checkbox" id="push_force">
+      <label for="push_force" style="margin-bottom:0; cursor:pointer;">Force re-push (override double-sending lock)</label>
+    </div>
+    <div style="margin-top: 1.2rem;">
+      <button onclick="doPush()">Push to BVC Logistics</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. Track Shipment</h2>
+    <div class="form-group">
+      <label>Voucher Number (vchno):</label>
+      <input type="text" id="track_vchno" placeholder="e.g. 1 or INV-001" value="1">
+    </div>
+    <button class="secondary" onclick="doTrack()">Query Tracking Status</button>
+  </div>
+
+  <div class="card">
+    <h2>Response Output</h2>
+    <div id="status_badge" style="margin-bottom: 0.5rem;"></div>
+    <pre id="output">// Click one of the buttons above to test</pre>
+  </div>
+
+  <div class="links">
+    <a href="/docs" target="_blank">Swagger API Docs (/docs)</a>
+    <a href="/health" target="_blank">Health Check (/health)</a>
+    <a href="/" target="_blank">Service Config (/json)</a>
+  </div>
+
+  <script>
+    async function doPush() {
+      const vchno = document.getElementById('push_vchno').value.trim();
+      const date = document.getElementById('push_date').value.trim();
+      const force = document.getElementById('push_force').checked ? '1' : '0';
+      if (!vchno) return alert('Please enter a voucher number');
+      
+      const out = document.getElementById('output');
+      const badge = document.getElementById('status_badge');
+      out.textContent = 'Calling /push endpoint...';
+      badge.innerHTML = '';
+
+      let url = `/push?vchno=${encodeURIComponent(vchno)}&force=${force}`;
+      if (date) url += `&date=${encodeURIComponent(date)}`;
+
+      try {
+        const resp = await fetch(url);
+        const data = await resp.json();
+        out.textContent = JSON.stringify(data, null, 2);
+        badge.innerHTML = resp.ok && data.ok
+          ? '<span class="badge badge-ok">SUCCESS (HTTP ' + resp.status + ')</span>'
+          : '<span class="badge badge-err">NOTICE (HTTP ' + resp.status + ')</span>';
+      } catch (err) {
+        out.textContent = 'Error: ' + err.message;
+        badge.innerHTML = '<span class="badge badge-err">NETWORK ERROR</span>';
+      }
     }
-    IN_MEMORY_LOGS.insert(0, entry)
-    if len(IN_MEMORY_LOGS) > 100:
-        IN_MEMORY_LOGS.pop()
+
+    async function doTrack() {
+      const vchno = document.getElementById('track_vchno').value.trim();
+      if (!vchno) return alert('Please enter a voucher number');
+      
+      const out = document.getElementById('output');
+      const badge = document.getElementById('status_badge');
+      out.textContent = 'Calling /track endpoint...';
+      badge.innerHTML = '';
+
+      try {
+        const resp = await fetch(`/track?vchno=${encodeURIComponent(vchno)}`);
+        const data = await resp.json();
+        out.textContent = JSON.stringify(data, null, 2);
+        badge.innerHTML = resp.ok && data.ok
+          ? '<span class="badge badge-ok">SUCCESS (HTTP ' + resp.status + ')</span>'
+          : '<span class="badge badge-err">NOTICE (HTTP ' + resp.status + ')</span>';
+      } catch (err) {
+        out.textContent = 'Error: ' + err.message;
+        badge.innerHTML = '<span class="badge badge-err">NETWORK ERROR</span>';
+      }
+    }
+  </script>
+</body>
+</html>"""
 
 
-@app.route("/")
-def index():
-    """Render single-page UI."""
-    return render_template("index.html")
-
-
-@app.route("/api/status", methods=["GET"])
-def api_status():
-    """
-    Check health of Tally XML Gateway and BVC configuration.
-    Returns status without leaking secrets.
-    """
-    safe_cfg = get_safe_config()
-    raw_cfg = load_raw_config()
-
-    tally_client = TallyClient(raw_cfg)
-    tally_status = tally_client.check_connection()
-    bvc_client = BVCClient(raw_cfg)
-
-    return jsonify({
-        "tally": tally_status,
-        "bvc": {
-            "configured": bvc_client.is_configured(),
-            "base_url": safe_cfg["bvc"]["base_url"],
-            "origin_account_id": safe_cfg["bvc"]["origin_account_id"],
-            "origin_addresses": safe_cfg["bvc"]["origin_addresses"],
+@app.get("/")
+def root():
+    """Service status and configured settings overview (secrets masked)."""
+    cfg = get_safe_config()
+    return {
+        "service": "Tally to BVC Logistics Middleware",
+        "status": "online",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "push_get": "/push?vchno=<voucher_number>&date=<yyyymmdd>&force=<0|1>",
+            "push_post": "/push?vchno=<voucher_number>&date=<yyyymmdd>&force=<0|1>",
+            "track": "/track?vchno=<voucher_number>",
+            "health": "/health",
+            "docs": "/docs",
         },
-        "config": safe_cfg,
-    })
+        "config": cfg,
+    }
 
 
-@app.route("/api/vouchers", methods=["GET"])
-def api_get_vouchers():
+@app.get("/health")
+def health():
+    """Healthcheck endpoint."""
+    return {"status": "ok", "time": datetime.now().isoformat()}
+
+
+def handle_push_request(
+    vchno: str,
+    date: Optional[str] = None,
+    force: bool = False
+) -> Dict[str, Any]:
     """
-    Fetch vouchers directly from Tally in given date range.
-    Stateless: Determines sent status and tracking details directly from Tally UDFs.
+    Core business logic for /push endpoint:
+    1. Fetch Sales voucher from Tally XML gateway.
+    2. Check double-sending protection (BVCShipmentNo).
+    3. Build BVC JSON request array.
+    4. Post to BVC Universe API with retries (masking API keys in logs).
+    5. Extract shipment number and write back to Tally (or write failure status).
+    6. Return clear JSON response.
     """
-    from_date = request.args.get("from_date", "").strip()
-    to_date = request.args.get("to_date", "").strip()
-    voucher_type = request.args.get("voucher_type", "Sales").strip() or "Sales"
+    if not vchno or not str(vchno).strip():
+        return {
+            "ok": False,
+            "message": "Missing required parameter 'vchno'",
+            "shipmentNo": None,
+        }
 
-    if not from_date or not to_date:
-        return jsonify({"error": "from_date and to_date query parameters are required"}), 400
+    vchno = str(vchno).strip()
+    config = load_config()
+    tally_cfg = config.get("tally", {})
+    bvc_cfg = config.get("bvc", {})
+    defaults = config.get("defaults", {})
 
-    raw_cfg = load_raw_config()
-    tally_client = TallyClient(raw_cfg)
-    default_origin_acc = raw_cfg["bvc"].get("origin_account_id", "SJ")
-    origin_addresses = raw_cfg["bvc"].get("origin_addresses", ["SJ-1"])
-    default_origin_addr = origin_addresses[0] if origin_addresses else "SJ-1"
+    LOGGER.info(f"Processing /push for voucher '{vchno}' (date: {date}, force: {force})...")
 
-    try:
-        vouchers = tally_client.fetch_vouchers(
-            from_date=from_date,
-            to_date=to_date,
-            voucher_type=voucher_type,
+    # ---------------------------------------------------------------------
+    # Step 1: Fetch Sales voucher from TallyPrime
+    # ---------------------------------------------------------------------
+    voucher, err = get_tally_sales_voucher(vchno=vchno, date=date, tally_config=tally_cfg)
+    if err or not voucher:
+        LOGGER.error(f"Failed fetching voucher '{vchno}' from Tally: {err}")
+        return {
+            "ok": False,
+            "message": err or f"Voucher '{vchno}' could not be retrieved from TallyPrime",
+            "shipmentNo": None,
+        }
+
+    # ---------------------------------------------------------------------
+    # Step 6: Block double-sending unless force=1
+    # ---------------------------------------------------------------------
+    existing_shipment_no = voucher.get("BVCShipmentNo", "").strip()
+    if existing_shipment_no and not force:
+        msg = f"Voucher '{vchno}' already has shipment number '{existing_shipment_no}'. Use force=1 to override."
+        LOGGER.warning(msg)
+        return {
+            "ok": False,
+            "message": msg,
+            "shipmentNo": existing_shipment_no,
+        }
+
+    # ---------------------------------------------------------------------
+    # Step 2: Build BVC request payload
+    # ---------------------------------------------------------------------
+    bvc_payload = build_bvc_shipment_payload(voucher=voucher, defaults=defaults)
+
+    # Validate essential destination details before calling BVC
+    dest_item = bvc_payload[0]
+    if not dest_item.get("Destination_AccountID") or not dest_item.get("Destination_AddressID"):
+        short_err = "Destination_AccountID and Destination_AddressID are required"
+        LOGGER.error(f"Cannot push voucher '{vchno}': {short_err}")
+        # Write failure status back to Tally
+        write_tally_voucher_status(
+            voucher_info=voucher,
+            shipment_no=None,
+            status=f"Failed: {short_err}",
+            tally_config=tally_cfg,
         )
-    except TallyClientError as e:
-        return jsonify({"error": str(e)}), 502
-    except Exception as e:
-        return jsonify({"error": f"Unexpected error reading from Tally: {str(e)}"}), 500
+        return {
+            "ok": False,
+            "message": f"Missing destination details for voucher '{vchno}'. Set UDFs on voucher or Party Ledger.",
+            "shipmentNo": None,
+        }
 
-    enriched_vouchers = []
-    for v in vouchers:
-        v_num = v.get("voucher_number", "")
-        v_type = v.get("voucher_type", voucher_type)
-        guid = v.get("guid", "")
+    # ---------------------------------------------------------------------
+    # Step 3 & 4: POST to BVC Universe API with retry logic & parse response
+    # ---------------------------------------------------------------------
+    is_success, http_code, raw_resp, call_err = call_bvc_create_shipment(
+        payload=bvc_payload,
+        bvc_config=bvc_cfg,
+        retries=2,
+    )
 
-        # Check validation
-        is_valid, missing_fields = validate_voucher_for_bvc(
-            voucher=v,
-            default_origin_account=default_origin_acc,
-            default_origin_address=default_origin_addr,
+    if not is_success:
+        short_err = (call_err or f"HTTP {http_code}")[:50]
+        LOGGER.error(f"BVC shipment creation failed for voucher '{vchno}': {call_err}")
+        # Step 5: On failure, write BVCStatus = "Failed: <short error>" to Tally
+        write_tally_voucher_status(
+            voucher_info=voucher,
+            shipment_no=None,
+            status=f"Failed: {short_err}",
+            tally_config=tally_cfg,
+        )
+        return {
+            "ok": False,
+            "message": f"BVC API failed: {call_err}",
+            "shipmentNo": None,
+        }
+
+    # Extract shipment / AWB number from response
+    configured_path = bvc_cfg.get("shipmentNoJsonPath", "Shipment_Number")
+    shipment_no = extract_shipment_number(raw_resp, json_path=configured_path)
+
+    # ---------------------------------------------------------------------
+    # Step 5: On success, write back to Tally
+    # ---------------------------------------------------------------------
+    timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    write_success, write_msg = write_tally_voucher_status(
+        voucher_info=voucher,
+        shipment_no=shipment_no or "",
+        status="Sent",
+        tally_config=tally_cfg,
+        sent_on=timestamp_str,
+    )
+
+    if not write_success:
+        LOGGER.warning(f"Shipment was created ({shipment_no}) but write-back to Tally encountered a warning: {write_msg}")
+
+    return {
+        "ok": True,
+        "message": f"Shipment created successfully and updated in Tally (Shipment: {shipment_no})",
+        "shipmentNo": shipment_no,
+    }
+
+
+@app.get("/push")
+def push_get(
+    vchno: str = Query(..., description="Voucher number in TallyPrime"),
+    date: Optional[str] = Query(None, description="Voucher date in YYYYMMDD or YYYY-MM-DD"),
+    force: Optional[str] = Query("0", description="Set to '1' or 'true' to allow re-pushing an already sent voucher"),
+):
+    """GET endpoint to push a sales invoice to BVC Logistics."""
+    is_force = str(force).strip().lower() in ("1", "true", "yes")
+    result = handle_push_request(vchno=vchno, date=date, force=is_force)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status_code, content=result)
+
+
+@app.post("/push")
+def push_post(
+    vchno: Optional[str] = Query(None, description="Voucher number via query param"),
+    date: Optional[str] = Query(None, description="Voucher date via query param"),
+    force: Optional[str] = Query("0", description="Force override flag via query param"),
+    body: Optional[Dict[str, Any]] = Body(None, description="Optional JSON body with vchno, date, force"),
+):
+    """
+    POST endpoint to push a sales invoice to BVC Logistics.
+    Accepts parameters via query parameters or JSON body.
+    """
+    body_data = body or {}
+    final_vchno = vchno or body_data.get("vchno") or body_data.get("voucher_number") or ""
+    final_date = date or body_data.get("date")
+    raw_force = force if vchno else (body_data.get("force") or force or "0")
+    is_force = str(raw_force).strip().lower() in ("1", "true", "yes")
+
+    result = handle_push_request(vchno=final_vchno, date=final_date, force=is_force)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status_code, content=result)
+
+
+@app.get("/track")
+def track(
+    vchno: str = Query(..., description="Voucher number to track"),
+):
+    """
+    ENDPOINT 2: GET /track?vchno=... (Stub for now)
+    Queries Tally for stored BVCShipmentNo and calls bvc.trackingUrl.
+    """
+    if not vchno:
+        raise HTTPException(status_code=400, detail="Missing required query parameter 'vchno'")
+
+    config = load_config()
+    tally_cfg = config.get("tally", {})
+    bvc_cfg = config.get("bvc", {})
+
+    voucher, err = get_tally_sales_voucher(vchno=vchno, date=None, tally_config=tally_cfg)
+    if err or not voucher:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "ok": False,
+                "message": err or f"Voucher '{vchno}' not found in TallyPrime",
+                "shipmentNo": None,
+            }
         )
 
-        # Sent status determined purely from Tally UDFs
-        sent_flag = str(v.get("voucher_sent_flag", "")).strip().lower()
-        shipment_id = str(v.get("voucher_shipment_id", "")).strip()
-        is_sent = sent_flag in ("yes", "1", "true") or bool(shipment_id)
+    shipment_no = voucher.get("BVCShipmentNo", "").strip()
+    if not shipment_no:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "ok": False,
+                "message": f"No BVCShipmentNo found on voucher '{vchno}'. Invoice may not have been pushed yet.",
+                "shipmentNo": None,
+            }
+        )
 
-        if is_sent:
-            status = "Sent"
-        elif not is_valid:
-            status = "Missing data"
-        else:
-            status = "Pending"
-
-        packages = v.get("packages") or 1
-        origin_address = v.get("voucher_origin_address") or default_origin_addr
-
-        enriched_vouchers.append({
-            "voucher_number": v_num,
-            "voucher_type": v_type,
-            "date": v.get("date", ""),
-            "party_name": v.get("party_name", ""),
-            "amount": v.get("amount", 0.0),
-            "guid": guid,
-            "packages": packages,
-            "origin_account_id": default_origin_acc,
-            "origin_address": origin_address,
-            "destination_account_id": v.get("ledger_account", ""),
-            "destination_address_id": v.get("ledger_address", ""),
-            "destination_contact_shortcode": v.get("ledger_contact", ""),
-            "status": status,
-            "is_valid": is_valid,
-            "missing_fields": missing_fields,
-            "shipment_id": shipment_id,
-            "tracking_url": v.get("voucher_tracking_url", ""),
-            "label_url": v.get("voucher_label_url", ""),
-            "last_error": None,
-        })
-
-    return jsonify({
-        "count": len(enriched_vouchers),
-        "vouchers": enriched_vouchers,
-    })
-
-
-@app.route("/api/preview", methods=["POST"])
-def api_preview_payload():
-    """
-    Generate the exact BVC JSON payload without calling BVC API.
-    Used for Dry-run modal and payload preview.
-    """
-    data = request.get_json() or {}
-    vouchers = data.get("vouchers", [])
-    origin_account_id = data.get("origin_account_id", "SJ")
-    origin_address_id = data.get("origin_address_id", "SJ-1")
-    is_v2 = bool(data.get("is_v2", False))
-
-    if not vouchers:
-        return jsonify({"error": "No vouchers provided for preview"}), 400
-
-    try:
-        if is_v2:
-            payload = build_v2_payload(
-                vouchers=vouchers,
-                origin_account_id=origin_account_id,
-                origin_address_id=origin_address_id,
-            )
-            return jsonify({
-                "mode": "V2 (Multi-invoice shipment)",
-                "payloads": [payload],
-            })
-        else:
-            payloads = []
-            for v in vouchers:
-                v_origin_addr = v.get("origin_address") or origin_address_id
-                v_payload = build_v1_payload(
-                    voucher=v,
-                    origin_account_id=origin_account_id,
-                    origin_address_id=v_origin_addr,
-                )
-                payloads.append({
-                    "voucher_number": v.get("voucher_number"),
-                    "payload": v_payload,
-                })
-            return jsonify({
-                "mode": "V1 (Single invoice per shipment)",
-                "payloads": payloads,
-            })
-    except (ValidationError, ValueError) as e:
-        missing_notes = []
-        for v in vouchers:
-            v_no = v.get("voucher_number", "Invoice")
-            if not v.get("destination_account_id"):
-                missing_notes.append(f"{v_no}: Destination Account ID is required")
-            if not v.get("destination_address_id"):
-                missing_notes.append(f"{v_no}: Destination Address ID is required")
-        if missing_notes:
-            return jsonify({
-                "error": "Cannot generate BVC payload because required destination details are missing:\n\n"
-                         + "\n".join(missing_notes)
-                         + "\n\nPlease enter the Destination Account ID and Address ID directly in the table row (or update the Party Ledger in Tally)."
-            }), 422
-        return jsonify({"error": f"Validation error generating payload: {str(e)}"}), 422
-
-
-@app.route("/api/send", methods=["POST"])
-def api_send_to_bvc():
-    """
-    Process selected vouchers:
-    - Dry-run mode: returns payload without external calls.
-    - Live mode: sends to BVC and writes tracking details directly back to Tally.
-    - Stateless: no database required.
-    """
-    data = request.get_json() or {}
-    vouchers = data.get("vouchers", [])
-    origin_account_id = data.get("origin_account_id", "SJ")
-    origin_address_id = data.get("origin_address_id", "SJ-1")
-    is_v2 = bool(data.get("is_v2", False))
-    dry_run = bool(data.get("dry_run", True))
-    force_resend = bool(data.get("force_resend", False))
-
-    if not vouchers:
-        return jsonify({"error": "No vouchers selected to send."}), 400
-
-    raw_cfg = load_raw_config()
-    bvc_client = BVCClient(raw_cfg, log_callback=record_audit_log)
-    tally_client = TallyClient(raw_cfg)
-
-    # 1. DRY-RUN MODE: return generated payloads immediately
-    if dry_run:
-        try:
-            if is_v2:
-                payload = build_v2_payload(
-                    vouchers=vouchers,
-                    origin_account_id=origin_account_id,
-                    origin_address_id=origin_address_id,
-                )
-                return jsonify({
-                    "dry_run": True,
-                    "message": "DRY-RUN ON: Exact JSON preview generated. No network calls made to BVC.",
-                    "payloads": [payload],
-                })
-            else:
-                payloads = []
-                for v in vouchers:
-                    v_addr = v.get("origin_address") or origin_address_id
-                    p = build_v1_payload(
-                        voucher=v,
-                        origin_account_id=origin_account_id,
-                        origin_address_id=v_addr,
-                    )
-                    payloads.append({"voucher_number": v.get("voucher_number"), "payload": p})
-                return jsonify({
-                    "dry_run": True,
-                    "message": "DRY-RUN ON: Exact JSON preview generated. No network calls made to BVC.",
-                    "payloads": payloads,
-                })
-        except (ValidationError, ValueError) as e:
-            missing_notes = []
-            for v in vouchers:
-                v_no = v.get("voucher_number", "Invoice")
-                if not v.get("destination_account_id"):
-                    missing_notes.append(f"{v_no}: Destination Account ID is required")
-                if not v.get("destination_address_id"):
-                    missing_notes.append(f"{v_no}: Destination Address ID is required")
-            if missing_notes:
-                return jsonify({
-                    "error": "Cannot generate BVC payload because required destination details are missing:\n\n"
-                             + "\n".join(missing_notes)
-                             + "\n\nPlease enter the Destination Account ID and Address ID directly in the table row (or update the Party Ledger in Tally)."
-                }), 422
-            return jsonify({"error": f"Validation failed in dry-run preview: {str(e)}"}), 422
-
-    # 2. LIVE MODE: Verify credentials first
-    if not bvc_client.is_configured():
-        return jsonify({
-            "error": "BVC credentials (app_id / api_key) are missing in config.json or environment variables."
-        }), 400
-
-    results: List[Dict[str, Any]] = []
-
-    # =========================================================================
-    # V2 MODE: Multiple invoices consolidated into ONE shipment
-    # =========================================================================
-    if is_v2:
-        to_process = []
-        for v in vouchers:
-            v_num = v.get("voucher_number", "")
-            sent_flag = str(v.get("voucher_sent_flag", "")).strip().lower()
-            ship_id = str(v.get("voucher_shipment_id", "")).strip()
-            is_already_sent = sent_flag in ("yes", "1", "true") or bool(ship_id)
-
-            if is_already_sent and not force_resend:
-                results.append({
-                    "voucher_number": v_num,
-                    "status": "SKIPPED",
-                    "message": "Already sent. Use explicit Resend action to override.",
-                })
-            else:
-                to_process.append(v)
-
-        if not to_process:
-            return jsonify({"results": results})
-
-        v_nums = [v.get("voucher_number", "") for v in to_process]
-        try:
-            payload = build_v2_payload(
-                vouchers=to_process,
-                origin_account_id=origin_account_id,
-                origin_address_id=origin_address_id,
-            )
-            resp = bvc_client.create_shipment_v2(payload, voucher_numbers=v_nums)
-
-            shipment_id = resp.get("shipment_id", "")
-            tracking_url = resp.get("tracking_url", "")
-            label_url = resp.get("shipping_label_pdf", "")
-
-            # Write tracking info back to each Tally voucher
-            for v in to_process:
-                v_num = v.get("voucher_number", "")
-                v_date = v.get("date", "")
-                v_guid = v.get("guid", "")
-
-                tally_ok, tally_msg = tally_client.alter_voucher_with_bvc_details(
-                    voucher_number=v_num,
-                    voucher_date=v_date,
-                    voucher_type=v.get("voucher_type", "Sales"),
-                    shipment_id=shipment_id,
-                    tracking_url=tracking_url,
-                    label_url=label_url,
-                    guid=v_guid,
-                )
-
-                results.append({
-                    "voucher_number": v_num,
-                    "status": "SENT",
-                    "shipment_id": shipment_id,
-                    "tracking_url": tracking_url,
-                    "label_url": label_url,
-                    "tally_writeback": tally_ok,
-                    "tally_message": tally_msg,
-                })
-
-        except (ValidationError, ValueError, BVCAPIError) as e:
-            err_msg = str(e)
-            for v in to_process:
-                results.append({
-                    "voucher_number": v.get("voucher_number", ""),
-                    "status": "FAILED",
-                    "error": err_msg,
-                })
-
-        return jsonify({"results": results})
-
-    # =========================================================================
-    # V1 MODE: One shipment per voucher
-    # =========================================================================
-    for v in vouchers:
-        v_num = v.get("voucher_number", "")
-        v_type = v.get("voucher_type", "Sales")
-        v_date = v.get("date", "")
-        v_guid = v.get("guid", "")
-        v_addr = v.get("origin_address") or origin_address_id
-
-        sent_flag = str(v.get("voucher_sent_flag", "")).strip().lower()
-        ship_id = str(v.get("voucher_shipment_id", "")).strip()
-        is_already_sent = sent_flag in ("yes", "1", "true") or bool(ship_id)
-
-        # Skip if already marked sent in Tally and not forcing resend
-        if is_already_sent and not force_resend:
-            results.append({
-                "voucher_number": v_num,
-                "status": "SKIPPED",
-                "message": "Already sent. Use explicit Resend action to override.",
-            })
-            continue
-
-        try:
-            payload = build_v1_payload(
-                voucher=v,
-                origin_account_id=origin_account_id,
-                origin_address_id=v_addr,
-            )
-
-            resp = bvc_client.create_shipment(payload, voucher_number=v_num)
-
-            shipment_id = resp.get("shipment_id", "")
-            tracking_url = resp.get("tracking_url", "")
-            label_url = resp.get("shipping_label_pdf", "")
-
-            # Write tracking info back to Tally voucher immediately
-            tally_ok, tally_msg = tally_client.alter_voucher_with_bvc_details(
-                voucher_number=v_num,
-                voucher_date=v_date,
-                voucher_type=v_type,
-                shipment_id=shipment_id,
-                tracking_url=tracking_url,
-                label_url=label_url,
-                guid=v_guid,
-            )
-
-            results.append({
-                "voucher_number": v_num,
-                "status": "SENT",
-                "shipment_id": shipment_id,
-                "tracking_url": tracking_url,
-                "label_url": label_url,
-                "tally_writeback": tally_ok,
-                "tally_message": tally_msg,
-            })
-
-        except (ValidationError, ValueError, BVCAPIError) as e:
-            err_msg = str(e)
-            results.append({
-                "voucher_number": v_num,
-                "status": "FAILED",
-                "error": err_msg,
-            })
-        except Exception as e:
-            err_msg = f"Unexpected failure: {str(e)}"
-            results.append({
-                "voucher_number": v_num,
-                "status": "FAILED",
-                "error": err_msg,
-            })
-
-    return jsonify({"results": results})
-
-
-@app.route("/api/logs", methods=["GET"])
-def api_logs():
-    """Return in-memory transient API logs for session audit UI."""
-    return jsonify({"logs": IN_MEMORY_LOGS})
-
-
-@app.route("/api/tracking/refresh", methods=["POST"])
-def api_tracking_refresh():
-    """Refresh tracking status for a shipment (stub)."""
-    data = request.get_json() or {}
-    shipment_id = data.get("shipment_id", "").strip()
-    if not shipment_id:
-        return jsonify({"error": "shipment_id is required"}), 400
-
-    bvc = BVCClient()
-    result = bvc.tracking_refresh(shipment_id)
-    return jsonify(result)
+    track_result = call_bvc_tracking(shipment_no=shipment_no, bvc_config=bvc_cfg)
+    return JSONResponse(status_code=200, content=track_result)
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"Starting tally-to-bvc middleware on http://127.0.0.1:{port}")
-    app.run(host="127.0.0.1", port=port, debug=True)
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
