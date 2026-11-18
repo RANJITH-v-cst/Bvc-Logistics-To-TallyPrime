@@ -1,8 +1,15 @@
 {
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "apiToken": "",
+    "allowGetPush": false
+  },
   "tally": {
-    "host": "localhost",
+    "host": "127.0.0.1",
     "port": 9000,
-    "companyName": ""
+    "companyName": "",
+    "voucherTypes": ["Sales"]
   },
   "bvc": {
     "baseUrl": "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI",

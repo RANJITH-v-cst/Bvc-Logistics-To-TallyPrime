@@ -1,6 +1,6 @@
 """
 BVC Logistics Universe API Service.
-Contains separate small functions for payload mapping, API transmission,
+Contains separate small functions for payload mapping, validation, API transmission,
 retries, response logging, and shipment number extraction.
 """
 
@@ -17,7 +17,68 @@ from tally_service import format_iso_date
 
 
 # =========================================================================
-# 1. Payload Mapping Function
+# 1. Validation Before Calling BVC (No Silent Defaults)
+# =========================================================================
+
+def validate_voucher_for_bvc(
+    voucher: Dict[str, Any]
+) -> Tuple[bool, List[str]]:
+    """
+    Validate sales voucher fields before calling BVC.
+    Rejects with specific errors if required fields are missing or invalid:
+    - Destination_AccountID: required, non-empty
+    - Destination_AddressID: required, non-empty
+    - NumberOfPackages: required, integer >= 1
+    - Net_Weight_gm: required, number > 0
+    - Product_Description: required, non-empty (stock item names from inventory)
+    """
+    errors: List[str] = []
+
+    # 1. Destination Account ID
+    dest_acc = str(voucher.get("BVCDestAccountID") or "").strip()
+    if not dest_acc:
+        errors.append("Destination_AccountID is missing (set on voucher or party ledger)")
+
+    # 2. Destination Address ID
+    dest_addr = str(voucher.get("BVCDestAddressID") or "").strip()
+    if not dest_addr:
+        errors.append("Destination_AddressID is missing (set on voucher or party ledger)")
+
+    # 3. Number of Packages (integer >= 1)
+    raw_pkgs = str(voucher.get("BVCNoOfPackages") or "").strip()
+    if not raw_pkgs:
+        errors.append("NumberOfPackages (BVCNoOfPackages) is missing")
+    else:
+        try:
+            val_pkgs = int(raw_pkgs)
+            if val_pkgs < 1:
+                errors.append(f"NumberOfPackages must be an integer >= 1 (got: {raw_pkgs})")
+        except ValueError:
+            errors.append(f"NumberOfPackages must be an integer >= 1 (got: '{raw_pkgs}')")
+
+    # 4. Net Weight gm (number > 0)
+    raw_net_wt = str(voucher.get("BVCNetWeightGm") or "").strip()
+    if not raw_net_wt:
+        errors.append("Net_Weight_gm (BVCNetWeightGm) is missing")
+    else:
+        try:
+            val_net_wt = float(raw_net_wt)
+            if val_net_wt <= 0:
+                errors.append(f"Net_Weight_gm must be greater than 0 (got: {raw_net_wt})")
+        except ValueError:
+            errors.append(f"Net_Weight_gm must be a valid number > 0 (got: '{raw_net_wt}')")
+
+    # 5. Product Description (stock item names from inventory entries)
+    stock_items = voucher.get("stock_items") or []
+    product_desc = ", ".join(stock_items).strip()
+    if not product_desc:
+        errors.append("Product_Description is empty; at least one stock item in inventory entries is required")
+
+    return len(errors) == 0, errors
+
+
+# =========================================================================
+# 2. Payload Mapping Function
 # =========================================================================
 
 def build_bvc_shipment_payload(
@@ -25,9 +86,10 @@ def build_bvc_shipment_payload(
     defaults: Dict[str, Any]
 ) -> List[Dict[str, str]]:
     """
-    Build the BVC Create Shipment request payload.
+    Build the BVC Create Shipment request payload (Domestic B2B ValSHIP V1).
     The body is a JSON ARRAY containing exactly one dictionary.
     All values are kept strictly as strings as requested by BVC API specifications.
+    Silent defaults for packages, weight, and product description have been removed.
     """
     # Service and Insurance
     bvc_service = voucher.get("BVCService") or defaults.get("bvcService") or "GoldSHIP"
@@ -39,25 +101,25 @@ def build_bvc_shipment_payload(
     shipment_date = format_iso_date(raw_date)
 
     # Origin details (from defaults)
-    origin_acc = str(defaults.get("originAccountId") or "SJ")
-    origin_addr = str(defaults.get("originAddressId") or "SJ-1")
-    origin_cont = str(defaults.get("originContactShortcode") or "SJ-1")
+    origin_acc = str(defaults.get("originAccountId") or "SJ").strip()
+    origin_addr = str(defaults.get("originAddressId") or "SJ-1").strip()
+    origin_cont = str(defaults.get("originContactShortcode") or origin_addr).strip()
 
-    # Destination details (from voucher, fallback to party ledger already merged)
+    # Destination details
     dest_acc = str(voucher.get("BVCDestAccountID") or "").strip()
     dest_addr = str(voucher.get("BVCDestAddressID") or "").strip()
     dest_cont = str(voucher.get("BVCDestContactShortcode") or "").strip()
 
     # Package and Weights
-    num_pkgs = str(voucher.get("BVCNoOfPackages") or "1").strip()
+    num_pkgs = str(voucher.get("BVCNoOfPackages") or "").strip()
     remarks = str(voucher.get("BVCRemarks") or "").strip()
-    net_weight = str(voucher.get("BVCNetWeightGm") or "0").strip()
+    net_weight = str(voucher.get("BVCNetWeightGm") or "").strip()
     gross_weight = str(voucher.get("BVCGrossWeightKg") or "").strip()
 
     # Invoice and Products
     invoice_val = str(voucher.get("amount") or "0").strip()
     stock_items = voucher.get("stock_items") or []
-    product_desc = ", ".join(stock_items) if stock_items else "Valuables"
+    product_desc = ", ".join(stock_items).strip()
     vchno = str(voucher.get("voucher_number") or "").strip()
 
     payload_item: Dict[str, str] = {
@@ -84,7 +146,7 @@ def build_bvc_shipment_payload(
 
 
 # =========================================================================
-# 2. Configurable Shipment Number Extraction
+# 3. Configurable Shipment Number Extraction
 # =========================================================================
 
 def extract_value_by_json_path(data: Any, path: str) -> Any:
@@ -95,7 +157,6 @@ def extract_value_by_json_path(data: Any, path: str) -> Any:
     if not path or data is None:
         return None
 
-    # Clean brackets: e.g. '[0].item' -> '0.item'
     cleaned_path = path.replace("[", "").replace("]", "")
     parts = cleaned_path.split(".")
 
@@ -110,7 +171,6 @@ def extract_value_by_json_path(data: Any, path: str) -> Any:
                 idx = int(part)
                 curr = curr[idx] if 0 <= idx < len(curr) else None
             except ValueError:
-                # If path didn't supply array index but curr is a list, try first item
                 if len(curr) > 0 and isinstance(curr[0], dict):
                     curr = curr[0].get(part)
                 else:
@@ -124,10 +184,14 @@ def extract_value_by_json_path(data: Any, path: str) -> Any:
     return curr
 
 
-def extract_shipment_number(response_data: Any, json_path: str = "Shipment_Number") -> Optional[str]:
+def extract_shipment_number(
+    response_data: Any,
+    json_path: str = "Shipment_Number"
+) -> Optional[str]:
     """
     Extract shipment / AWB number from response using configurable json path.
-    If the path returns empty, checks common known BVC fields as fallback.
+    Does not guess unconfirmed field names.
+    If path is 'Shipment_Number', checks that key directly or in first array item.
     """
     if not response_data:
         return None
@@ -137,40 +201,52 @@ def extract_shipment_number(response_data: Any, json_path: str = "Shipment_Numbe
     if val is not None and str(val).strip():
         return str(val).strip()
 
-    # If response is a list and path was applied without leading index
+    # 2. If response is a list and path was applied without leading index (e.g. [{"Shipment_Number": "..."}])
     if isinstance(response_data, list) and len(response_data) > 0:
         val = extract_value_by_json_path(response_data[0], json_path)
         if val is not None and str(val).strip():
             return str(val).strip()
 
-    # 2. Fallback heuristic on common BVC response fields
+    # 3. Confirmed standard BVC field fallback
     target_obj = response_data[0] if isinstance(response_data, list) and len(response_data) > 0 else response_data
     if isinstance(target_obj, dict):
-        fallback_keys = [
-            "Shipment_Number",
-            "ShipmentNumber",
-            "ShipmentNo",
-            "Shipment_No",
-            "AWBNo",
-            "AWB_No",
-            "AWBNumber",
-            "AWB",
-            "DocketNo",
-            "Docket_No",
-            "ShipmentID",
-            "shipment_id",
-            "TrackingNumber",
-        ]
-        for key in fallback_keys:
-            candidate = target_obj.get(key)
+        for confirmed_key in ("Shipment_Number", "AWBNo", "ShipmentNumber"):
+            candidate = target_obj.get(confirmed_key)
             if candidate is not None and str(candidate).strip():
                 return str(candidate).strip()
 
     return None
 
 
+def inspect_response_for_errors(raw_response: Any) -> Optional[str]:
+    """
+    Inspect BVC response body for error flags or messages.
+    Returns error string if an error flag is detected, otherwise None.
+    """
+    if not raw_response:
+        return None
+
+    target = raw_response[0] if isinstance(raw_response, list) and len(raw_response) > 0 else raw_response
+    if isinstance(target, dict):
+        status_flag = str(target.get("Status") or target.get("status") or "").upper()
+        if status_flag in ("FAILED", "FAILURE", "ERROR"):
+            err_msg = target.get("ErrorMessage") or target.get("Error") or target.get("Message") or target.get("message")
+            return str(err_msg or f"BVC reported status: {status_flag}")
+
+        is_success = target.get("isSuccess") if "isSuccess" in target else target.get("IsSuccess")
+        if is_success is False:
+            err_msg = target.get("ErrorMessage") or target.get("Error") or target.get("Message") or target.get("message")
+            return str(err_msg or "BVC reported isSuccess: false")
+
+        error_field = target.get("Error") or target.get("error") or target.get("ErrorMessage") or target.get("errorMessage")
+        if error_field and str(error_field).strip():
+            return str(error_field).strip()
+
+    return None
+
+
 # =========================================================================
-# 3. HTTP Call with Retries (Network Errors Retried 2x, No Retry on 4xx)
+# 4. HTTP Call with Retries (Connection Refused Only, No Retry on Timeout or 4xx)
 # =========================================================================
 
 def call_bvc_create_shipment(
@@ -180,8 +256,9 @@ def call_bvc_create_shipment(
 ) -> Tuple[bool, int, Any, Optional[str]]:
     """
     Post shipment payload to BVC Universe API endpoint.
-    - Retry network errors up to `retries` times.
-    - No retry on 4xx client errors.
+    - Retry ONLY on connection-refused style errors that occur before the request is sent.
+    - NEVER retry after a Timeout or read error (it may have created the shipment on BVC).
+    - NEVER retry on 4xx client errors.
     - Full raw request and response logged (API key masked).
     Returns: (is_success, http_status_code, raw_response, error_message)
     """
@@ -214,7 +291,6 @@ def call_bvc_create_shipment(
             duration_ms = (time.time() - start_time) * 1000
             status_code = resp.status_code
 
-            # Try parsing JSON response
             try:
                 raw_response = resp.json()
             except Exception:
@@ -236,23 +312,40 @@ def call_bvc_create_shipment(
                 LOGGER.warning(f"{err_msg} - Will not retry 4xx.")
                 return False, status_code, raw_response, err_msg
 
-            # Check 5xx Server Error: can retry
+            # Check 5xx Server Error: server handled request, do not retry blindly
             if status_code >= 500:
-                last_error = f"BVC Server Error (HTTP {status_code})"
-                if attempt < max_attempts:
-                    LOGGER.warning(f"{last_error} - Retrying ({attempt}/{max_attempts})...")
-                    time.sleep(1.0 * attempt)
-                    continue
-                return False, status_code, raw_response, last_error
+                err_msg = f"BVC Server Error (HTTP {status_code}): {raw_response}"
+                LOGGER.error(err_msg)
+                return False, status_code, raw_response, err_msg
 
-            # Success 2xx
+            # Check for error flags in response body even on 2xx
+            body_err = inspect_response_for_errors(raw_response)
+            if body_err:
+                LOGGER.error(f"BVC responded with error in body: {body_err}")
+                return False, status_code, raw_response, body_err
+
+            # Success 2xx with clean body
             return True, status_code, raw_response, None
 
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        except requests.exceptions.Timeout as e:
+            # DO NOT RETRY TIMEOUT: Request was sent, shipment may have been created!
             duration_ms = (time.time() - start_time) * 1000
-            err_type = "Timeout" if isinstance(e, requests.exceptions.Timeout) else "Connection Error"
-            last_error = f"BVC Network {err_type}: {str(e)}"
+            err_msg = f"BVC Request Timeout after {timeout}s. Not retrying as shipment may have been created on server: {str(e)}"
+            LOGGER.error(err_msg)
+            log_transaction(
+                tag="BVC_CREATE_SHIPMENT",
+                endpoint=url,
+                request_headers=headers,
+                request_body=payload,
+                duration_ms=duration_ms,
+                error=err_msg,
+            )
+            return False, 0, None, err_msg
 
+        except requests.exceptions.ConnectionError as e:
+            # Connection refused before request reached server: safe to retry
+            duration_ms = (time.time() - start_time) * 1000
+            last_error = f"BVC Connection Error: {str(e)}"
             log_transaction(
                 tag="BVC_CREATE_SHIPMENT",
                 endpoint=url,
@@ -263,10 +356,10 @@ def call_bvc_create_shipment(
             )
 
             if attempt < max_attempts:
-                LOGGER.warning(f"{last_error} - Retrying ({attempt}/{max_attempts})...")
+                LOGGER.warning(f"{last_error} - Retrying connection ({attempt}/{max_attempts})...")
                 time.sleep(1.0 * attempt)
             else:
-                LOGGER.error(f"{last_error} - All {max_attempts} attempts failed.")
+                LOGGER.error(f"{last_error} - All {max_attempts} connection attempts failed.")
 
         except requests.exceptions.RequestException as e:
             duration_ms = (time.time() - start_time) * 1000
@@ -281,11 +374,11 @@ def call_bvc_create_shipment(
             )
             return False, 0, None, last_error
 
-    return False, status_code, raw_response, last_error or "Network retry limit exceeded"
+    return False, status_code, raw_response, last_error or "Connection failed"
 
 
 # =========================================================================
-# 4. Tracking Stub Function (Endpoint 2)
+# 5. Tracking Stub Function (Endpoint 2)
 # =========================================================================
 
 def call_bvc_tracking(
@@ -293,7 +386,7 @@ def call_bvc_tracking(
     bvc_config: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Call BVC tracking URL with the stored shipment number.
+    Call BVC tracking URL with stored shipment number.
     Currently stubbed as requested until user pastes 'Get Tracking Details' docs.
     """
     tracking_url = bvc_config.get("trackingUrl", "TODO")
@@ -310,7 +403,6 @@ def call_bvc_tracking(
             "status": "Pending Documentation"
         }
 
-    # If trackingUrl is an actual URL, execute request with headers
     headers = {
         "Content-Type": "application/json",
         "X-Contacts-AppId": app_id,
@@ -318,7 +410,6 @@ def call_bvc_tracking(
     }
 
     try:
-        # Placeholder call: GET trackingUrl?shipmentNo=...
         resp = requests.get(
             tracking_url,
             params={"shipmentNo": shipment_no},

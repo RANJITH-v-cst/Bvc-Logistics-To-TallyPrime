@@ -15,12 +15,9 @@ ENV/
 *.sqlite3
 debug/
 
-# Reference repositories
-chirix_ref/
-advent_ref/
-
-# Configuration with credentials
-config.json
+# Logs
+logs/
+*.log
 
 # Pytest & cache
 .pytest_cache/
@@ -30,4 +27,3 @@ htmlcov/
 # IDE files
 .vscode/
 .idea/
-

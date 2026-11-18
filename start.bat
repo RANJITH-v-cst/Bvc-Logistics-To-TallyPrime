@@ -15,14 +15,14 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-echo [INFO] Starting FastAPI Middleware Service...
-echo [INFO] Endpoint: http://127.0.0.1:8000
-echo [INFO] Interactive Swagger Docs: http://127.0.0.1:8000/docs
+echo [INFO] Starting FastAPI Middleware Service on 127.0.0.1:8000...
+echo [INFO] Interactive Web Console: http://127.0.0.1:8000/ui
+echo [INFO] Swagger API Docs: http://127.0.0.1:8000/docs
+echo [INFO] ReDoc API Docs: http://127.0.0.1:8000/redoc
 echo [INFO] Press Ctrl+C to stop the service.
 echo.
 
-REM Start FastAPI with Uvicorn
-python -m uvicorn app:app --host 0.0.0.0 --port 8000 --log-level info
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
 
 if %ERRORLEVEL% neq 0 (
     echo.

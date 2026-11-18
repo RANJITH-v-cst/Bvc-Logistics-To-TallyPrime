@@ -1,135 +1,327 @@
 ;; =========================================================================
-;; TDL Definitions for BVC Logistics Integration with TallyPrime
-;; Strict TDL Hierarchy: Report -> Form -> Part -> Line -> Field
-;; Never attach a Field directly to a Part. It must go through a Line.
+;; BVC LOGISTICS UNIVERSE API (ValSHIP V3) - TALLYPRIME TDL INTEGRATION
+;; Complete, standalone TDL definitions. Follows strict TDL component hierarchy:
+;; Report -> Form -> Part -> Line -> Field
+;; Never attach a Field directly to a Part. Always go through a Line.
 ;; =========================================================================
 
+;; =========================================================================
+;; 1. SYSTEM UDF DEFINITIONS
+;; =========================================================================
 [System: UDF]
-    ;; Destination Delivery Details (Used on Voucher and Party Ledger)
-    BVCDestAccountID         : String  : 11001
-    BVCDestAddressID         : String  : 11002
-    BVCDestContactShortcode  : String  : 11003
+    ;; Company Level Toggle Flag
+    EnableBVCShipment        : Logical : 11000
 
-    ;; Voucher Specific Shipment Details
-    BVCNoOfPackages          : String  : 11004
-    BVCNetWeightGm           : String  : 11005
-    BVCGrossWeightKg         : String  : 11006
-    BVCService               : String  : 11007
+    ;; ADV BVC Shipment Input UDFs (Indexes 41101 - 41106)
+    ADVBVCService            : String  : 41101
+    ADVBVCProduct            : String  : 41102
+    ADVBVCNetWt              : Amount  : 41103
+    ADVBVCGrossWt            : Amount  : 41104
+    ADVBVCInsurance          : Logical : 41105
+    ADVBVCExhibition         : Logical : 41106
+
+    ;; ADV BVC Write-Back & Audit UDFs (Indexes 41107 - 41110)
+    ADVBVCShipmentNo         : String  : 41107
+    ADVBVCStatus             : String  : 41108
+    ADVBVCError              : String  : 41109
+    ADVBVCCreatedOn          : String  : 41110
+
+    ;; Legacy / Fallback Fields (Retained for compatibility)
+    BVCPickupAddress         : String  : 11001
+    BVCConsigneeAddressCode  : String  : 11002
+    BVCProductDesc           : String  : 11003
+    BVCNetWeightGm           : String  : 11004
+    BVCGrossWeightKg         : String  : 11005
+    BVCNoOfPackages          : String  : 11006
+    BVCDeclaredValue         : String  : 11007
     BVCInsurance             : String  : 11008
-    BVCRemarks               : String  : 11009
-
-    ;; BVC Shipment Response & Tracking Details
-    BVCShipmentNo            : String  : 11010
-    BVCStatus                : String  : 11011
-    BVCSentOn                : String  : 11012
-
-;; =========================================================================
-;; 1. Modify Party Ledger Master Screen
-;; =========================================================================
-[#Part: LED Other Details]
-    Add : Line : After : LED SubHeading : BVC Party Dest Line 1, BVC Party Dest Line 2
-
-[Line: BVC Party Dest Line 1]
-    Field : Medium Prompt, BVC Ledger Acc Field, Short Prompt, BVC Ledger Addr Field
-    Local : Field : Medium Prompt : Set as : "BVC Account ID:"
-    Local : Field : Short Prompt  : Set as : "BVC Address ID:"
-
-[Field: BVC Ledger Acc Field]
-    Use     : Name Field
-    Storage : BVCDestAccountID
-    Width   : 20
-
-[Field: BVC Ledger Addr Field]
-    Use     : Name Field
-    Storage : BVCDestAddressID
-    Width   : 20
-
-[Line: BVC Party Dest Line 2]
-    Field : Medium Prompt, BVC Ledger Contact Field
-    Local : Field : Medium Prompt : Set as : "BVC Contact Code:"
-
-[Field: BVC Ledger Contact Field]
-    Use     : Name Field
-    Storage : BVCDestContactShortcode
-    Width   : 20
+    BVCShipmentNo            : String  : 11009
+    BVCStatus                : String  : 11010
+    BVCCreatedOn             : String  : 11011
+    BVCError                 : String  : 11012
+    BVCDestAddressID         : String  : 11013
+    BVCDestAccountID         : String  : 11014
 
 ;; =========================================================================
-;; 2. Modify Sales Voucher Screen
+;; 2. COMPANY LEVEL TOGGLE (F11 Features)
+;; =========================================================================
+[#Part: CMP F11 General]
+    Add : Line : At End : BVC Company Toggle Line
+
+[Line: BVC Company Toggle Line]
+    Field : BVC Prompt Cmp Toggle, BVC Field Cmp Toggle
+
+[Field: BVC Prompt Cmp Toggle]
+    Use    : Simple Field
+    Set as : "Enable BVC Shipment Integration?"
+    Width  : 32
+    Skip   : Yes
+
+[Field: BVC Field Cmp Toggle]
+    Use     : Logical Field
+    Storage : EnableBVCShipment
+    Width   : 6
+
+[System: Formula]
+    IsBVCEnabled : if $$IsEmpty:$EnableBVCShipment:Company:##SVCURRENTCOMPANY then Yes else $EnableBVCShipment:Company:##SVCURRENTCOMPANY
+
+;; =========================================================================
+;; 3. SERVICE & PRODUCT SELECTION TABLES
+;; =========================================================================
+[Collection: ADVBVCServiceTable]
+    Title     : "Select BVC Service"
+    List Name : "ValSHIP"
+    List Name : "SilverSHIP"
+    List Name : "GenSHIP"
+    List Name : "ExhibiSHIP"
+
+[Collection: ADVBVCProductTable]
+    Title     : "Select BVC Product Description"
+    List Name : "Diamond Jewellery"
+    List Name : "Gold Jewellery"
+    List Name : "Silver Jewellery"
+    List Name : "Precious Stones"
+    List Name : "Semi Precious Stones"
+    List Name : "Pearls"
+    List Name : "Watches"
+    List Name : "Bullion"
+    List Name : "Imitation Jewellery"
+
+;; =========================================================================
+;; 4. ADV BVC SHIPMENT PART (Attached to Sales Voucher)
 ;; =========================================================================
 [#Part: VCH Title]
-    Add : Line : After : Basic Info : BVC VCH Dest Line, BVC VCH Pkg Line, BVC VCH Status Line
+    Add : Part : At End : ADV BVC Shipment Part
 
-;; Line: Destination Overrides
-[Line: BVC VCH Dest Line]
-    Field : Short Prompt, BVC VCH Dest Acc Field, Short Prompt, BVC VCH Dest Addr Field, Short Prompt, BVC VCH Dest Contact Field
-    Local : Field : Short Prompt : 1 : Set as : "BVC Acc:"
-    Local : Field : Short Prompt : 2 : Set as : "BVC Addr:"
-    Local : Field : Short Prompt : 3 : Set as : "BVC Cont:"
+[Part: ADV BVC Shipment Part]
+    Lines : ADV BVC Header Line, ADV BVC Input Line 1, ADV BVC Input Line 2, ADV BVC Writeback Line 1, ADV BVC Writeback Line 2
+    Invisible : NOT (@@IsBVCEnabled AND $$IsSales:$VoucherTypeName)
 
-[Field: BVC VCH Dest Acc Field]
-    Use     : Name Field
-    Storage : BVCDestAccountID
-    Width   : 14
+;; Header Line
+[Line: ADV BVC Header Line]
+    Field : ADV BVC Header Prompt
 
-[Field: BVC VCH Dest Addr Field]
-    Use     : Name Field
-    Storage : BVCDestAddressID
-    Width   : 14
+[Field: ADV BVC Header Prompt]
+    Use    : Simple Field
+    Set as : "--- BVC Logistics ValSHIP Details (Press Alt+B to Create Shipment) ---"
+    Color  : "Blue"
+    Width  : 80
+    Skip   : Yes
 
-[Field: BVC VCH Dest Contact Field]
-    Use     : Name Field
-    Storage : BVCDestContactShortcode
-    Width   : 14
+;; Line 1: Service, Product, Net Weight (g), Gross Weight (g)
+[Line: ADV BVC Input Line 1]
+    Field : ADV BVC Prompt Service, ADV BVC Field Service, ADV BVC Prompt Product, ADV BVC Field Product, ADV BVC Prompt NetWt, ADV BVC Field NetWt, ADV BVC Prompt GrossWt, ADV BVC Field GrossWt
 
-;; Line: Packages, Weights, Service, Remarks
-[Line: BVC VCH Pkg Line]
-    Field : Short Prompt, BVC VCH Pkg Field, Short Prompt, BVC VCH Net Wt Field, Short Prompt, BVC VCH Gross Wt Field, Short Prompt, BVC VCH Service Field
-    Local : Field : Short Prompt : 1 : Set as : "Pkgs:"
-    Local : Field : Short Prompt : 2 : Set as : "Net(g):"
-    Local : Field : Short Prompt : 3 : Set as : "Gross(kg):"
-    Local : Field : Short Prompt : 4 : Set as : "Service:"
+[Field: ADV BVC Prompt Service]
+    Use    : Simple Field
+    Set as : "BVC Service:"
+    Width  : 12
+    Skip   : Yes
 
-[Field: BVC VCH Pkg Field]
-    Use     : Name Field
-    Storage : BVCNoOfPackages
+[Field: ADV BVC Field Service]
+    Use        : Name Field
+    Storage    : ADVBVCService
+    Table      : ADVBVCServiceTable
+    Show Table : Always
+    Width      : 14
+
+[Field: ADV BVC Prompt Product]
+    Use    : Simple Field
+    Set as : "Product:"
+    Width  : 10
+    Skip   : Yes
+
+[Field: ADV BVC Field Product]
+    Use        : Name Field
+    Storage    : ADVBVCProduct
+    Table      : ADVBVCProductTable
+    Show Table : Always
+    Width      : 22
+
+[Field: ADV BVC Prompt NetWt]
+    Use    : Simple Field
+    Set as : "Net Wt (g):"
+    Width  : 12
+    Skip   : Yes
+
+[Field: ADV BVC Field NetWt]
+    Use     : Amount Field
+    Storage : ADVBVCNetWt
+    Width   : 10
+
+[Field: ADV BVC Prompt GrossWt]
+    Use    : Simple Field
+    Set as : "Gross Wt (g):"
+    Width  : 14
+    Skip   : Yes
+
+[Field: ADV BVC Field GrossWt]
+    Use     : Amount Field
+    Storage : ADVBVCGrossWt
+    Width   : 10
+
+;; Line 2: Insurance (Yes/No), Exhibition (Yes/No)
+[Line: ADV BVC Input Line 2]
+    Field : ADV BVC Prompt Insurance, ADV BVC Field Insurance, ADV BVC Prompt Exhibition, ADV BVC Field Exhibition
+
+[Field: ADV BVC Prompt Insurance]
+    Use    : Simple Field
+    Set as : "Insurance by BVC:"
+    Width  : 18
+    Skip   : Yes
+
+[Field: ADV BVC Field Insurance]
+    Use     : Logical Field
+    Storage : ADVBVCInsurance
+    Set as  : if $$IsEmpty:$ADVBVCInsurance then No else $ADVBVCInsurance
     Width   : 8
 
-[Field: BVC VCH Net Wt Field]
-    Use     : Name Field
-    Storage : BVCNetWeightGm
-    Width   : 10
+[Field: ADV BVC Prompt Exhibition]
+    Use    : Simple Field
+    Set as : "Exhibition Shipment:"
+    Width  : 20
+    Skip   : Yes
 
-[Field: BVC VCH Gross Wt Field]
-    Use     : Name Field
-    Storage : BVCGrossWeightKg
-    Width   : 10
+[Field: ADV BVC Field Exhibition]
+    Use     : Logical Field
+    Storage : ADVBVCExhibition
+    Set as  : if $$IsEmpty:$ADVBVCExhibition then No else $ADVBVCExhibition
+    Width   : 8
 
-[Field: BVC VCH Service Field]
-    Use     : Name Field
-    Storage : BVCService
-    Width   : 12
+;; Write-back Line 1: Shipment No & Status (Read-Only, Shown only when Service is chosen)
+[Line: ADV BVC Writeback Line 1]
+    Invisible : $$IsEmpty:$ADVBVCService
+    Field     : ADV BVC Prompt ShipNo, ADV BVC Field ShipNo, ADV BVC Prompt Status, ADV BVC Field Status, ADV BVC Prompt CreatedOn, ADV BVC Field CreatedOn
 
-;; Line: BVC Shipment Status, Shipment No, Sent Date
-[Line: BVC VCH Status Line]
-    Field : Short Prompt, BVC VCH Ship No Field, Short Prompt, BVC VCH Status Field, Short Prompt, BVC VCH Sent On Field
-    Local : Field : Short Prompt : 1 : Set as : "BVC Ship#:"
-    Local : Field : Short Prompt : 2 : Set as : "Status:"
-    Local : Field : Short Prompt : 3 : Set as : "Sent On:"
+[Field: ADV BVC Prompt ShipNo]
+    Use    : Simple Field
+    Set as : "BVC Shipment No:"
+    Width  : 16
+    Skip   : Yes
 
-[Field: BVC VCH Ship No Field]
-    Use        : Name Field
-    Storage    : BVCShipmentNo
+[Field: ADV BVC Field ShipNo]
+    Use        : Simple Field
+    Storage    : ADVBVCShipmentNo
     Width      : 18
+    Inactive   : Yes
+    Skip       : Yes
     Set Always : Yes
 
-[Field: BVC VCH Status Field]
-    Use        : Name Field
-    Storage    : BVCStatus
-    Width      : 20
+[Field: ADV BVC Prompt Status]
+    Use    : Simple Field
+    Set as : "Status:"
+    Width  : 10
+    Skip   : Yes
+
+[Field: ADV BVC Field Status]
+    Use        : Simple Field
+    Storage    : ADVBVCStatus
+    Width      : 14
+    Inactive   : Yes
+    Skip       : Yes
     Set Always : Yes
 
-[Field: BVC VCH Sent On Field]
-    Use        : Name Field
-    Storage    : BVCSentOn
-    Width      : 20
+[Field: ADV BVC Prompt CreatedOn]
+    Use    : Simple Field
+    Set as : "Created On:"
+    Width  : 12
+    Skip   : Yes
+
+[Field: ADV BVC Field CreatedOn]
+    Use        : Simple Field
+    Storage    : ADVBVCCreatedOn
+    Width      : 22
+    Inactive   : Yes
+    Skip       : Yes
     Set Always : Yes
+
+;; Write-back Line 2: Last Error (Read-Only, Shown only when Error is present)
+[Line: ADV BVC Writeback Line 2]
+    Invisible : $$IsEmpty:$ADVBVCError
+    Field     : ADV BVC Prompt Error, ADV BVC Field Error
+
+[Field: ADV BVC Prompt Error]
+    Use    : Simple Field
+    Set as : "BVC Error:"
+    Width  : 16
+    Skip   : Yes
+
+[Field: ADV BVC Field Error]
+    Use        : Simple Field
+    Storage    : ADVBVCError
+    Width      : 60
+    Inactive   : Yes
+    Skip       : Yes
+    Set Always : Yes
+
+;; =========================================================================
+;; 5. BUTTON TRIGGERS (Alt+B: Create Shipment & Cancel Shipment)
+;; =========================================================================
+[#Form: Voucher]
+    Add : Button : BVCCreateShipmentBtn
+    Add : Button : BVCCancelShipmentBtn
+
+[Button: BVCCreateShipmentBtn]
+    Title    : "Create BVC Shipment"
+    Key      : Alt + B
+    Action   : Call : BVCCallCreateShipment
+    Inactive : NOT (@@IsBVCEnabled AND $$IsSales:$VoucherTypeName)
+
+[Button: BVCCancelShipmentBtn]
+    Title    : "Cancel BVC Shipment"
+    Action   : Call : BVCCallCancelShipment
+    Inactive : NOT (@@IsBVCEnabled AND $$IsSales:$VoucherTypeName AND NOT ($$IsEmpty:$ADVBVCShipmentNo AND $$IsEmpty:$BVCShipmentNo))
+
+;; =========================================================================
+;; 6. TDL FUNCTIONS FOR HTTP CALLS TO MIDDLEWARE
+;; =========================================================================
+[Function: BVCCallCreateShipment]
+    Variable : vGuid    : String
+    Variable : vCompany : String
+    Variable : vReq     : String
+    Variable : vResp    : String
+
+    00 : Set : vGuid    : $$String:$Guid
+    10 : Set : vCompany : $$String:##SVCURRENTCOMPANY
+
+    ;; Validate GUID
+    20 : If : $$IsEmpty:##vGuid
+    30 :     Msg Box : "BVC Logistics" : "Please save and reopen the sales voucher before creating a shipment."
+    40 :     Return
+    50 : End If
+
+    60 : Set : vReq : '{"voucher_guid": "' + ##vGuid + '", "company": "' + ##vCompany + '"}'
+    70 : Set : vResp : $$RemoteRequest:"http://127.0.0.1:8000/shipments/from-voucher":##vReq:"application/json":"POST"
+
+    80 : If : $$IsEmpty:##vResp
+    90 :     Msg Box : "BVC Middleware Error" : "Could not connect to BVC Middleware on http://127.0.0.1:8000. Ensure the middleware service is started."
+    100:     Return
+    110: End If
+
+    120: Msg Box : "BVC Response" : ##vResp
+    130: Action : Refresh
+
+[Function: BVCCallCancelShipment]
+    Variable : vGuid    : String
+    Variable : vCompany : String
+    Variable : vReq     : String
+    Variable : vResp    : String
+
+    00 : Set : vGuid    : $$String:$Guid
+    10 : Set : vCompany : $$String:##SVCURRENTCOMPANY
+
+    20 : If : $$IsEmpty:##vGuid
+    30 :     Msg Box : "BVC Logistics" : "Voucher GUID is empty."
+    40 :     Return
+    50 : End If
+
+    60 : Set : vReq : '{"voucher_guid": "' + ##vGuid + '", "reason": "Cancelled in Tally", "company": "' + ##vCompany + '"}'
+    70 : Set : vResp : $$RemoteRequest:"http://127.0.0.1:8000/shipments/cancel":##vReq:"application/json":"POST"
+
+    80 : If : $$IsEmpty:##vResp
+    90 :     Msg Box : "BVC Middleware Error" : "Could not connect to BVC Middleware on http://127.0.0.1:8000."
+    100:     Return
+    110: End If
+
+    120: Msg Box : "BVC Cancel Status" : ##vResp
+    130: Action : Refresh

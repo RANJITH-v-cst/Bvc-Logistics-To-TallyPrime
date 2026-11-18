@@ -1,277 +1,183 @@
-# Tally to BVC Logistics Middleware
+# BVC Logistics to TallyPrime Middleware (ValSHIP V3)
 
-A high-performance Python (FastAPI) middleware service running locally on Windows alongside **TallyPrime**. It fetches Sales Invoices from TallyPrime's XML Gateway, transforms them into **BVC Logistics (BVC Universe API)** shipment creation requests, and automatically writes the generated shipment/AWB number and status back into TallyPrime without duplicate vouchers.
+A high-performance Python (FastAPI) middleware service running locally on Windows alongside **TallyPrime**. It bridges TallyPrime Sales Invoices with **BVC Universe API (ValSHIP Domestic B2B V3)**, automates shipment creation, idempotently manages shipping note numbers, and writes execution status directly back to the Sales Voucher.
 
 ---
 
-## Architecture & File Structure
-
-The codebase is strictly modularized with separate small functions for every Tally XML request and BVC API call, making it straightforward to inspect, test, and tweak field mappings:
+## 1. System Architecture & File Structure
 
 ```text
-BVC LOGISTICS/
-├── app.py                 # FastAPI service defining /push, /track, /health, /
-├── tally_service.py       # Modular Tally XML builders, parsers, and HTTP gateway client
-├── bvc_service.py         # Modular BVC JSON payload builders, retries, and API client
-├── config_manager.py      # Reads config.json, normalizes parameters, and masks secrets
-├── logger_util.py         # Daily rotating logger (/logs) with automatic credential masking
-├── config.json            # Active configuration file (all settings, zero hardcoding)
-├── config.example.json    # Example configuration template
-├── bvc_udfs.tdl           # TDL definitions for TallyPrime UDFs, screens, and lines
-├── test_bvc_uat.py        # Standalone test script to test BVC UAT API without Tally
-├── start.bat              # One-click Windows launch script
-├── requirements.txt       # Python dependencies (FastAPI, Uvicorn, Requests, lxml, pytest)
+Bvc-Logistics-To-TallyPrime/
+├── app/
+│   ├── __init__.py            # Package root exposing app instance
+│   ├── main.py                # FastAPI app, lifespan, CORS, /health, /ui, /docs, /redoc
+│   ├── config.py              # Pydantic-settings, UAT pincode checker & secret masking
+│   ├── store.py               # SQLite audit store, idempotency cache & history
+│   ├── bvc/
+│   │   ├── __init__.py
+│   │   ├── client.py          # BVC HTTP client (httpx, timeout, retries, auth)
+│   │   └── payload_v3.py      # V3 payload builder, data cleaners & strict pre-validators
+│   ├── tally/
+│   │   ├── __init__.py
+│   │   ├── client.py          # Tally HTTP gateway client (.LIST-aware XML parser)
+│   │   └── xml_templates.py   # XML templates for GUID export, party export & voucher alter
+│   └── routes/
+│       ├── __init__.py
+│       └── shipments.py       # Endpoints: /shipments/from-voucher, /cancel, /{sn}
+├── docs/
+│   └── bvc_v3_create_shipment.md  # V3 specification placeholder & field mapping doc
 ├── tests/
-│   └── test_middleware.py # 19 unit & integration tests covering all requirements
-└── logs/                  # Daily rotating log directory (e.g. bvc_middleware.log)
+│   ├── __init__.py
+│   ├── conftest.py            # Pytest fixtures, mock data & isolated test DB
+│   └── test_shipments.py      # 20 automated unit & integration tests (respx, FastAPI TestClient)
+├── bvc_udfs.tdl               # TallyPrime TDL (UDF definitions, F11 toggle, Alt+B action)
+├── start.bat                  # One-click Windows launch script
+├── requirements.txt           # fastapi, uvicorn, httpx, respx, pydantic, lxml, pytest
+├── .env.example               # Environment variables template
+└── .env                       # Active local configuration (git-ignored)
 ```
 
 ---
 
-## Configuration (`config.json`)
+## 2. Configuration (`.env`)
 
-All settings are stored in `config.json`. Nothing is hardcoded:
+Configuration is managed via standard environment variables and `.env`. Secrets are never hardcoded or output in logs:
 
-```json
-{
-  "tally": {
-    "host": "localhost",
-    "port": 9000,
-    "companyName": ""
-  },
-  "bvc": {
-    "baseUrl": "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI",
-    "appId": "YOUR_BVC_APP_ID",
-    "appKey": "YOUR_BVC_APP_KEY",
-    "createShipmentUrl": "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI/CreateShipments",
-    "createAddressUrl": "TODO",
-    "trackingUrl": "TODO",
-    "shipmentNoJsonPath": "Shipment_Number"
-  },
-  "defaults": {
-    "originAccountId": "SJ",
-    "originAddressId": "SJ-1",
-    "originContactShortcode": "SJ-1",
-    "bvcService": "GoldSHIP",
-    "insuranceByBvc": "No"
-  }
-}
+```ini
+# Environment mode: 'uat' or 'prod'
+ENV=uat
+
+# BVC Universe API
+BVC_BASE_URL=https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI/
+BVC_APP_ID=YOUR_BVC_APP_ID
+BVC_APP_KEY=YOUR_BVC_APP_KEY
+BVC_SHIPPING_ACCOUNT=SJ
+BVC_TRACKING_PATH=GetTrackingDetails
+
+# TallyPrime XML Gateway
+TALLY_URL=http://localhost:9000
+TALLY_COMPANY=
+
+# Middleware Security (Optional)
+API_TOKEN=
 ```
-
-### Config Field Details:
-- **`tally.host` & `tally.port`**: Address of TallyPrime HTTP server (default `localhost:9000`).
-- **`tally.companyName`**: Optional target company name if multiple companies are loaded in Tally.
-- **`bvc.baseUrl`**: BVC Universe API base URL (Staging: `https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI`).
-- **`bvc.appId` & `bvc.appKey`**: API credentials sent as HTTP headers `X-Contacts-AppId` and `X-Contacts-Key`.
-- **`bvc.createShipmentUrl`**: Endpoint for creating shipments.
-- **`bvc.shipmentNoJsonPath`**: Configurable JSON path or key to extract the shipment/AWB number from the response (e.g., `"Shipment_Number"`, `"AWBNo"`, or `"data.shipmentNo"`).
-- **`defaults`**: Fallback origin account, address, contact shortcode, service, and insurance if not specified on the voucher.
 
 ---
 
-## TallyPrime Setup & TDL Installation
+## 3. TallyPrime Setup & TDL Installation
 
-### 1. Enable TallyPrime HTTP Gateway
+### Step 1: Enable TallyPrime HTTP Gateway
 1. Open TallyPrime.
 2. Press `F1: Help` -> `Settings` -> `Connectivity`.
 3. Set **Client/Server Configuration**:
-   - *TallyPrime acts as*: **Both** (or Server)
-   - *Port*: **9000**
+   - **TallyPrime acts as**: `Both` (or `Server`)
+   - **Port**: `9000`
 4. Restart TallyPrime if prompted.
 
-### 2. Load `bvc_udfs.tdl`
-1. In TallyPrime, press `F1: Help` -> `TDLs & Add-on` -> press `F4: Manage Local TDLs`.
+### Step 2: Load `bvc_udfs.tdl`
+1. In TallyPrime, press `F1: Help` -> `TDLs & Add-ons` -> press `F4: Manage Local TDLs`.
 2. Under **Load selected TDL files on startup**, choose **Yes**.
-3. Under **File Name**, enter the path to [bvc_udfs.tdl](file:///c:/Users/ranji/OneDrive/Desktop/BVC%20LOGISTICS/bvc_udfs.tdl).
+3. Under **File Name**, enter the path to `bvc_udfs.tdl`.
 4. Press Enter to save.
 
-This defines the required UDFs on Sales Vouchers and Party Ledgers:
-- **Destination UDFs**: `BVCDestAccountID`, `BVCDestAddressID`, `BVCDestContactShortcode`.
-- **Voucher Shipment UDFs**: `BVCNoOfPackages`, `BVCNetWeightGm`, `BVCGrossWeightKg`, `BVCService`, `BVCInsurance`, `BVCRemarks`.
-- **Write-back UDFs**: `BVCShipmentNo`, `BVCStatus`, `BVCSentOn`.
+### Step 3: Enable Feature in F11
+1. On Gateway of Tally, press `F11: Features`.
+2. Find the feature: **Enable BVC Shipment Integration**.
+3. Set it to **Yes** and save (`Ctrl+A`).
 
 ---
 
-## Running the Middleware
+## 4. Voucher User Defined Fields (UDFs)
 
-### Option 1: Simple Launch via `start.bat`
-Double-click `start.bat` in Windows Explorer or run from CMD:
+| TDL Field Name | Type | UI Mode | Purpose |
+| :--- | :--- | :--- | :--- |
+| `BVCPickupAddress` | String | Editable / Pop-up Table | Origin pickup location (Allowed values: `SJ-1`, `SJ-2`). Defaults to `SJ-1`. |
+| `BVCConsigneeAddressCode` | String | Editable | BVC Destination Address identifier (falls back to party ledger UDF if blank). |
+| `BVCProductDesc` | String | Editable | Package contents description (defaults to joined inventory stock item names). |
+| `BVCNoOfPackages` | Number | Editable | Number of packages in shipment (must be integer $\ge 1$). |
+| `BVCNetWeightGm` | Quantity | Editable | Net weight in grams (must be numeric $> 0$). |
+| `BVCGrossWeightKg` | Quantity | Editable | Optional gross weight in kilograms. |
+| `BVCDeclaredValue` | Amount | Editable | Declared value for insurance/customs (defaults to voucher total amount). |
+| `BVCInsurance` | String | Pop-up List | Transit insurance option (`Yes` / `No`). Defaults to `No`. |
+| `BVCShipmentNo` | String | Read-Only | BVC Shipping Note No / AWB written back on creation. |
+| `BVCStatus` | String | Read-Only | Current status (`Created`, `Failed: <reason>`, `Cancelled`). |
+| `BVCCreatedOn` | String | Read-Only | Timestamp when the shipment was recorded. |
+| `BVCError` | String | Read-Only | Truncated error message (max 250 characters) if failure occurred. |
+
+---
+
+## 5. Middleware Endpoints
+
+- **`POST /shipments/from-voucher`**:
+  - Request: `{"voucher_guid": "...", "company": "..."}`
+  - Fetches voucher and party ledger from Tally.
+  - Validates fields (blocks zero packages, zero weight, missing consignee).
+  - Checks idempotency: if already created, returns existing shipping note without re-sending.
+  - Calls BVC `CreateShipment/V3` and writes `BVCShipmentNo` and `BVCStatus="Created"` back to Tally via XML Alter.
+- **`POST /shipments/cancel`**:
+  - Request: `{"voucher_guid": "...", "reason": "..."}`
+  - Calls BVC `CancelShipment` and sets `BVCStatus="Cancelled"` on the voucher.
+- **`GET /shipments/{shipping_note_no}`**:
+  - Calls BVC `ViewShipments?ShippingNoteNo=...` and returns shipment details.
+- **`GET /health`**:
+  - Verifies connectivity with TallyPrime (port 9000) and BVC API.
+- **`GET /ui`**:
+  - Interactive zero-dependency browser testing console.
+- **`GET /docs`**:
+  - Swagger UI interactive documentation.
+- **`GET /redoc`**:
+  - ReDoc documentation with stable CDN and offline fallback.
+
+---
+
+## 6. Running the Middleware
+
+Run the service on Windows using the included batch file:
 ```cmd
 start.bat
 ```
-
-### Option 2: Run via Python CLI
-```bash
-python -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Interactive Swagger documentation is available at: **`http://localhost:8000/docs`**
-
-### Option 3: Run as a Windows Service (Production)
-You can use [NSSM (Non-Sucking Service Manager)](https://nssm.cc/) to run the middleware as a persistent Windows Service that restarts on reboot:
+Or start manually via uvicorn:
 ```cmd
-nssm install BvcTallyMiddleware "C:\Users\ranji\AppData\Local\Programs\Python\Python312\python.exe" "-m uvicorn app:app --host 0.0.0.0 --port 8000"
-nssm set BvcTallyMiddleware AppDirectory "C:\Users\ranji\OneDrive\Desktop\BVC LOGISTICS"
-nssm start BvcTallyMiddleware
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
 ```
+
+Access the interfaces in your browser:
+- **Web Console**: [http://127.0.0.1:8000/ui](http://127.0.0.1:8000/ui)
+- **Swagger Docs**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- **ReDoc Docs**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
 
 ---
 
-## Testing Without Tally (`test_bvc_uat.py`)
+## 7. Running Automated Tests
 
-A standalone test script is provided so you can verify BVC credentials and payload transmission to the UAT endpoint without needing Tally running:
-
-```bash
-python test_bvc_uat.py
+Run the full test suite with pytest:
+```cmd
+python -m pytest tests/test_shipments.py -v
 ```
-
-This script:
-1. Loads `config.json` and masks your API key.
-2. Constructs a sample BVC shipment JSON array with all string values.
-3. Sends a POST request to `createShipmentUrl` with `X-Contacts-AppId` and `X-Contacts-Key`.
-4. Outputs the HTTP status code, full raw response, and extracted shipment number.
+All 20 test cases cover schema validation, address/phone sanitization, Tally XML `.LIST` parsing, write-back truncation, idempotency, and route error handling.
 
 ---
 
-## API Endpoints & `curl` Examples
+## 8. UAT Checklist & Serviceable Pincodes
 
-### 1. `GET /push` — Push Voucher by Query Parameters
-```bash
-curl "http://localhost:8000/push?vchno=INV-001&date=20261117"
-```
-
-#### Example Success Response (HTTP 200):
-```json
-{
-  "ok": true,
-  "message": "Shipment created successfully and updated in Tally (Shipment: BVC987654321)",
-  "shipmentNo": "BVC987654321"
-}
-```
-
-#### Double-Sending Protection (HTTP 400):
-If `BVCShipmentNo` already exists on the voucher, the request is blocked:
-```json
-{
-  "ok": false,
-  "message": "Voucher 'INV-001' already has shipment number 'BVC987654321'. Use force=1 to override.",
-  "shipmentNo": "BVC987654321"
-}
-```
-
-#### Override Double-Sending with `force=1`:
-```bash
-curl "http://localhost:8000/push?vchno=INV-001&date=20261117&force=1"
-```
+During staging/UAT testing:
+- **Origin Account**: `SJ` (Suraaj Jewellers)
+- **Origin Addresses**: `SJ-1` or `SJ-2`
+- **UAT Serviceable Pincodes**: `400006`, `852131`, `600001`, `500000`, `110059`, `854318`, `110014`, `121008`, `110011`.
+- If an invoice has a destination outside this list, the middleware records a warning in the audit logs without blocking the shipment.
 
 ---
 
-### 2. `POST /push` — Push Voucher via JSON Body
-```bash
-curl -X POST "http://localhost:8000/push" \
-  -H "Content-Type: application/json" \
-  -d '{"vchno": "INV-001", "date": "20261117", "force": "0"}'
-```
+## 9. Production Cutover Guide
 
----
-
-### 3. `GET /track` — Track Shipment (Stub)
-```bash
-curl "http://localhost:8000/track?vchno=INV-001"
-```
-
-#### Response:
-```json
-{
-  "ok": true,
-  "message": "Tracking request format is TODO pending documentation",
-  "shipmentNo": "BVC987654321",
-  "trackingUrl": "TODO",
-  "status": "Pending Documentation"
-}
-```
-
----
-
-### 4. `GET /health` — Healthcheck
-```bash
-curl "http://localhost:8000/health"
-```
-
----
-
-## Workflow Details
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as Client / User
-    participant App as FastAPI Middleware
-    participant Tally as TallyPrime XML Gateway
-    participant BVC as BVC Universe API
-
-    User->>App: GET /push?vchno=INV-001&date=20261117
-    App->>Tally: Export Collection (Filter by VoucherNumber)
-    Tally-->>App: Voucher XML (Date, Party, Items, Amount, UDFs, GUID)
-    
-    alt Destination UDFs empty on voucher
-        App->>Tally: Export Collection (Filter Ledger by PartyName)
-        Tally-->>App: Party Ledger Destination UDFs
-    end
-
-    alt BVCShipmentNo already present and force!=1
-        App-->>User: HTTP 400 (Already sent, blocked)
-    else
-        App->>BVC: POST /CreateShipments (Array with 1 JSON object)
-        Note over App,BVC: Headers: X-Contacts-AppId, X-Contacts-Key<br/>Auto-retry 2x on network error; no retry on 4xx
-        
-        alt BVC Success (2xx)
-            BVC-->>App: Raw Response JSON
-            App->>App: Extract shipmentNo using shipmentNoJsonPath
-            App->>Tally: Import Data (ACTION="Alter" with GUID)<br/>BVCShipmentNo, BVCStatus="Sent", BVCSentOn
-            Tally-->>App: Altered: 1, Errors: 0
-            App-->>User: { ok: true, shipmentNo: "...", message: "..." }
-        else BVC Error (4xx/5xx)
-            BVC-->>App: Error Response
-            App->>Tally: Import Data (ACTION="Alter")<br/>BVCStatus="Failed: <short error>"
-            App-->>User: { ok: false, shipmentNo: null, message: "..." }
-        end
-    end
-```
-
----
-
-## Customizing Field Mappings
-
-Every Tally XML request and BVC call is isolated in small, self-contained functions:
-
-- **Tally Voucher Query**: Edit `build_fetch_voucher_xml()` in [tally_service.py](file:///c:/Users/ranji/OneDrive/Desktop/BVC%20LOGISTICS/tally_service.py#L182).
-- **Party Ledger Query**: Edit `build_fetch_party_ledger_xml()` in [tally_service.py](file:///c:/Users/ranji/OneDrive/Desktop/BVC%20LOGISTICS/tally_service.py#L309).
-- **Voucher Alter (Write-back)**: Edit `build_alter_voucher_xml()` in [tally_service.py](file:///c:/Users/ranji/OneDrive/Desktop/BVC%20LOGISTICS/tally_service.py#L368).
-- **BVC Payload Mapping**: Edit `build_bvc_shipment_payload()` in [bvc_service.py](file:///c:/Users/ranji/OneDrive/Desktop/BVC%20LOGISTICS/bvc_service.py#L22).
-- **Shipment Number Extraction**: Configured dynamically in `config.json` via `bvc.shipmentNoJsonPath`, resolved in `extract_shipment_number()` in [bvc_service.py](file:///c:/Users/ranji/OneDrive/Desktop/BVC%20LOGISTICS/bvc_service.py#L107).
-
----
-
-## Logging & Security
-
-- Daily rotating log files are saved to `logs/bvc_middleware.log` (rotating at midnight with `.YYYY-MM-DD.log` suffix).
-- All API requests and responses are logged with timestamps, durations, and status codes.
-- Sensitive credentials (`X-Contacts-Key`, `appKey`, `api_key`) are **automatically redacted** before being logged to disk or console.
-
----
-
-## Running Automated Tests
-
-Run the full pytest suite (19 test cases):
-```bash
-python -m pytest -v tests/test_middleware.py
-```
-All tests run with mocked networking and verify:
-- Configuration normalization & secret masking
-- Tally XML building (fetch voucher, fetch ledger, alter voucher)
-- Tally XML parsing (UDFs, inventory stock items, alter responses)
-- BVC payload construction (date formatting, string enforcement)
-- Shipment number extraction (keys, dot paths, array indices, fallback heuristics)
-- Retry logic (2 network retries, immediate failure on 4xx)
-- Endpoint handlers (double-sending block, force override, write-back, tracking stub)
+When moving from UAT to Production:
+1. Update `.env`:
+   ```ini
+   ENV=prod
+   BVC_BASE_URL=https://prod.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI/
+   BVC_APP_ID=YOUR_PRODUCTION_APP_ID
+   BVC_APP_KEY=YOUR_PRODUCTION_APP_KEY
+   BVC_SHIPPING_ACCOUNT=YOUR_PRODUCTION_ACCOUNT_CODE
+   ```
+2. In `bvc_udfs.tdl`, update the pickup address table values if production addresses differ from `SJ-1`/`SJ-2`.
+3. Restart `start.bat`.

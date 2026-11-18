@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 CONFIG_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
@@ -26,15 +26,32 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
 def normalize_config(raw_cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize config keys to ensure compatibility with camelCase and snake_case."""
+    server = raw_cfg.get("server", {})
     tally = raw_cfg.get("tally", {})
     bvc = raw_cfg.get("bvc", {})
     defaults = raw_cfg.get("defaults", {})
 
+    # Server normalization
+    server_norm = {
+        "host": str(server.get("host") or "127.0.0.1").strip(),
+        "port": int(server.get("port") or 8000),
+        "apiToken": str(server.get("apiToken") or server.get("api_token") or "").strip(),
+        "allowGetPush": bool(server.get("allowGetPush") or server.get("allow_get_push") or False),
+    }
+
     # Tally normalization
+    v_types = tally.get("voucherTypes") or tally.get("voucher_types")
+    if not v_types:
+        v_type_single = tally.get("voucherType") or tally.get("voucher_type")
+        v_types = [v_type_single] if v_type_single else ["Sales"]
+    elif isinstance(v_types, str):
+        v_types = [x.strip() for x in v_types.split(",") if x.strip()]
+
     tally_norm = {
-        "host": str(tally.get("host") or "localhost").strip(),
+        "host": str(tally.get("host") or "127.0.0.1").strip(),
         "port": int(tally.get("port") or 9000),
         "companyName": str(tally.get("companyName") or tally.get("company") or "").strip(),
+        "voucherTypes": list(v_types),
         "timeout": int(tally.get("timeout") or tally.get("timeout_seconds") or 30),
     }
 
@@ -60,6 +77,7 @@ def normalize_config(raw_cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     return {
+        "server": server_norm,
         "tally": tally_norm,
         "bvc": bvc_norm,
         "defaults": defaults_norm,
@@ -81,7 +99,12 @@ def get_safe_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     bvc = dict(cfg.get("bvc", {}))
     if "appKey" in bvc:
         bvc["appKey"] = mask_secret(bvc["appKey"])
+    server = dict(cfg.get("server", {}))
+    if "apiToken" in server:
+        server["apiToken"] = mask_secret(server["apiToken"])
+
     return {
+        "server": server,
         "tally": cfg.get("tally", {}),
         "bvc": bvc,
         "defaults": cfg.get("defaults", {}),

@@ -1,0 +1,30 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "apiToken": "",
+    "allowGetPush": false
+  },
+  "tally": {
+    "host": "127.0.0.1",
+    "port": 9000,
+    "companyName": "",
+    "voucherTypes": ["Sales"]
+  },
+  "bvc": {
+    "baseUrl": "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI",
+    "appId": "XaX7xpLvqvFaE8GqDkLHKgU9i",
+    "appKey": "3J62XZPsu9jPWyPmShawTySjRUB7iK1EIhc9XP2YJGwAKkvQS7",
+    "createShipmentUrl": "https://staging.bvclogistics.com/BVCUniverseAPI/rest/BVCAPI/CreateShipments",
+    "createAddressUrl": "TODO",
+    "trackingUrl": "TODO",
+    "shipmentNoJsonPath": "Shipment_Number"
+  },
+  "defaults": {
+    "originAccountId": "SJ",
+    "originAddressId": "SJ-1",
+    "originContactShortcode": "SJ-1",
+    "bvcService": "GoldSHIP",
+    "insuranceByBvc": "No"
+  }
+}

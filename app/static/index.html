@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BVC Logistics & TallyPrime Shipping Console</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+  <!-- Top Navigation Bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo-icon">📦</div>
+      <div>
+        <h1 class="brand-title">BVC Logistics to TallyPrime Middleware</h1>
+        <span class="brand-sub">TallyPrime Sales Invoices to BVC Universe API</span>
+      </div>
+    </div>
+
+    <div class="status-group">
+      <span id="env-badge" class="badge badge-uat">UAT</span>
+
+      <div class="status-indicator" id="tally-status-indicator" title="TallyPrime HTTP Gateway (Port 9000)">
+        <span class="dot dot-unknown" id="tally-dot"></span>
+        <span id="tally-status-text">Tally: Checking...</span>
+      </div>
+
+      <div class="status-indicator" id="bvc-status-indicator" title="BVC Universe API Connectivity">
+        <span class="dot dot-unknown" id="bvc-dot"></span>
+        <span id="bvc-status-text">BVC: Checking...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="container">
+
+    <!-- Filters & Period Row -->
+    <section class="card filter-card">
+      <div class="filter-row">
+        <div class="filter-group">
+          <label for="from-date">From Date</label>
+          <input type="date" id="from-date" class="form-control">
+        </div>
+
+        <div class="filter-group">
+          <label for="to-date">To Date</label>
+          <input type="date" id="to-date" class="form-control">
+        </div>
+
+        <div class="filter-group presets-group">
+          <label>Quick Presets</label>
+          <div class="btn-group">
+            <button type="button" class="btn btn-outline preset-btn" data-preset="today">Today</button>
+            <button type="button" class="btn btn-outline preset-btn" data-preset="yesterday">Yesterday</button>
+            <button type="button" class="btn btn-outline preset-btn" data-preset="week">This Week</button>
+            <button type="button" class="btn btn-outline preset-btn active" data-preset="month">This Month</button>
+            <button type="button" class="btn btn-outline preset-btn" data-preset="last_month">Last Month</button>
+          </div>
+        </div>
+
+        <div class="filter-group">
+          <label for="voucher-type">Voucher Type</label>
+          <select id="voucher-type" class="form-control">
+            <option value="Sales" selected>Sales</option>
+            <option value="GST SALES">GST SALES</option>
+            <option value="">All Types</option>
+          </select>
+        </div>
+
+        <div class="filter-group action-group">
+          <label>&nbsp;</label>
+          <button type="button" id="fetch-btn" class="btn btn-primary">
+            <span class="btn-icon">🔄</span> Fetch from Tally
+          </button>
+        </div>
+      </div>
+
+      <!-- Second Filter Row: Search & Status Filter -->
+      <div class="filter-row sub-filter-row">
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="search-input" placeholder="Search by Voucher No or Party Name..." class="form-control">
+        </div>
+
+        <div class="status-filter-group">
+          <label for="status-filter">Status Filter:</label>
+          <select id="status-filter" class="form-control">
+            <option value="all">All Vouchers</option>
+            <option value="ready" selected>Ready to Ship</option>
+            <option value="not_ready">Not Ready (Missing Data)</option>
+            <option value="shipped">Already Shipped</option>
+            <option value="failed">Failed</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- Alert / Banner Box -->
+    <div id="alert-box" class="alert-box d-none">
+      <span id="alert-icon">⚠️</span>
+      <span id="alert-message">Notice</span>
+      <button type="button" class="alert-close" onclick="document.getElementById('alert-box').classList.add('d-none')">&times;</button>
+    </div>
+
+    <!-- Summary Statistics Bar -->
+    <section class="summary-bar">
+      <div class="stat-pill">Total: <span id="stat-total" class="stat-val">0</span></div>
+      <div class="stat-pill stat-ready">Ready: <span id="stat-ready" class="stat-val">0</span></div>
+      <div class="stat-pill stat-not-ready">Not Ready: <span id="stat-not-ready" class="stat-val">0</span></div>
+      <div class="stat-pill stat-shipped">Shipped: <span id="stat-shipped" class="stat-val">0</span></div>
+      <div class="stat-pill stat-failed">Failed: <span id="stat-failed" class="stat-val">0</span></div>
+      <div class="stat-pill stat-selected">Selected: <span id="stat-selected" class="stat-val">0</span></div>
+
+      <div class="actions-group">
+        <button type="button" id="select-all-btn" class="btn btn-sm btn-outline">Select All Ready</button>
+        <button type="button" id="create-shipments-btn" class="btn btn-success" disabled>
+          🚀 Create BVC Shipments (<span id="btn-selected-count">0</span>)
+        </button>
+      </div>
+    </section>
+
+    <!-- Progress Indicator (Hidden by default) -->
+    <div id="progress-container" class="card progress-card d-none">
+      <div class="progress-header">
+        <span id="progress-title">Creating BVC Shipments...</span>
+        <span id="progress-counter">0 / 0</span>
+      </div>
+      <div class="progress-bar-bg">
+        <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%;"></div>
+      </div>
+      <div id="progress-status-msg" class="progress-msg">Initializing batch...</div>
+    </div>
+
+    <!-- Vouchers Table Section -->
+    <section class="card table-card">
+      <div class="table-responsive">
+        <table class="data-table" id="vouchers-table">
+          <thead>
+            <tr>
+              <th width="40"><input type="checkbox" id="header-checkbox"></th>
+              <th width="95">Date</th>
+              <th width="120">Voucher No</th>
+              <th>Party Name</th>
+              <th width="85">Pincode</th>
+              <th width="105">Service</th>
+              <th width="130">Product</th>
+              <th width="80" class="text-right">Net (g)</th>
+              <th width="80" class="text-right">Gross (g)</th>
+              <th width="100" class="text-right">Amount (₹)</th>
+              <th width="115">Validation</th>
+              <th width="130">Shipment No</th>
+              <th width="100">Status</th>
+            </tr>
+          </thead>
+          <tbody id="vouchers-tbody">
+            <tr>
+              <td colspan="13" class="empty-state">
+                <div class="empty-icon">📋</div>
+                <div class="empty-title">No Vouchers Loaded</div>
+                <div class="empty-desc">Select a period above and click "Fetch from Tally" to load Sales Invoices.</div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Modal / Dialog for Raw Details -->
+  <div id="detail-modal" class="modal d-none">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title">Voucher Details</h3>
+        <button type="button" class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body">
+        <!-- Rendered dynamically -->
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
