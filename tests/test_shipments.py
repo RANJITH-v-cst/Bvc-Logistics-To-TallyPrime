@@ -290,11 +290,6 @@ def test_store_idempotency(clean_db):
     row = get_shipment_by_guid(guid)
     assert row["status"] == "Cancelled"
 
-
-# ============================================================================
-# 5. Route Integration Tests with Mocked External Calls
-# ============================================================================
-
 def test_from_voucher_tally_offline(client: TestClient, clean_db):
     """If TallyPrime is unreachable, endpoint should return 502 with helpful error."""
     with respx.mock:
@@ -323,7 +318,6 @@ def test_from_voucher_validation_failure(client: TestClient, clean_db):
         '<UDF:BVCNOOFPACKAGES desc="BVCNoOfPackages" TYPE="Number">2</UDF:BVCNOOFPACKAGES>',
         '<UDF:BVCNOOFPACKAGES desc="BVCNoOfPackages" TYPE="Number">0</UDF:BVCNOOFPACKAGES>',
     )
-
     with respx.mock:
         respx.post("http://localhost:9000").respond(status_code=200, text=bad_vch_xml)
 
