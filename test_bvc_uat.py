@@ -34,7 +34,7 @@ def run_bvc_uat_test():
     app_id = bvc.get("appId", "")
     app_key = bvc.get("appKey", "")
     timeout = bvc.get("timeout", 30)
-    shipment_path = bvc.get("shipmentNoJsonPath", "Shipment_Number")
+    shipment_path = bvc.get("shipmentNoJsonPath", "ShippingNoteNumber")
 
     print(f"Target URL : {url}")
     print(f"App ID     : {app_id}")
@@ -48,20 +48,20 @@ def run_bvc_uat_test():
     # Sample test payload with all values as strings as specified
     sample_payload = [
         {
-            "BVC_Service": str(defaults.get("bvcService") or "GoldSHIP"),
+            "BVC_Service": str(defaults.get("bvcService") or "ValSHIP"),
             "Shipment_Date": today_str,
             "Origin_AccountID": str(defaults.get("originAccountId") or "SJ"),
             "Origin_AddressID": str(defaults.get("originAddressId") or "SJ-1"),
             "Origin_Contact_Shortcode": str(defaults.get("originContactShortcode") or "SJ-1"),
-            "Destination_AccountID": "TESTACC",
-            "Destination_AddressID": "TESTADDR",
-            "Destination_Contact_Shortcode": "TESTCONT",
+            "Destination_AccountID": str(defaults.get("destinationAccountId") or "SJ"),
+            "Destination_AddressID": str(defaults.get("destinationAddressId") or "SJ-2"),
+            "Destination_Contact_Shortcode": str(defaults.get("destinationContactShortcode") or "SJ-2"),
             "NumberOfPackages": "1",
-            "Additional_Remarks__c": "Test shipment from BVC Middleware UAT script",
+            "Additional_Remarks__c": "UAT Test Shipment",
             "Net_Weight_gm": "50",
             "Gross_Weight_kg": "0.1",
             "Invoice_Value": "50000",
-            "Product_Description": "Gold Jewellery 22K",
+            "Product_Description": "Gold Jewellery",
             "InsuranceByBVC": str(defaults.get("insuranceByBvc") or "No"),
             "Reference1": test_ref,
             "SubBillingAccountShortcode": ""

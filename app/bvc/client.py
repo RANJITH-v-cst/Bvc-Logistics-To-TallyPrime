@@ -59,12 +59,12 @@ class BVCClient:
         if isinstance(target, dict):
             status = str(target.get("Status") or target.get("status") or "").upper()
             if status in ("FAILED", "FAILURE", "ERROR"):
-                return target.get("ErrorMessage") or target.get("Error") or target.get("Message") or f"Status: {status}"
+                return target.get("ErrorDetails") or target.get("ErrorMessage") or target.get("Error") or target.get("Message") or f"Status: {status}"
 
             if target.get("isSuccess") is False or target.get("IsSuccess") is False:
-                return target.get("ErrorMessage") or target.get("Error") or target.get("Message") or "isSuccess: false"
+                return target.get("ErrorDetails") or target.get("ErrorMessage") or target.get("Error") or target.get("Message") or "isSuccess: false"
 
-            err = target.get("Error") or target.get("error") or target.get("ErrorMessage") or target.get("errorMessage")
+            err = target.get("ErrorDetails") or target.get("Error") or target.get("error") or target.get("ErrorMessage") or target.get("errorMessage")
             if err and str(err).strip():
                 return str(err).strip()
 
@@ -77,7 +77,7 @@ class BVCClient:
 
         target = raw_resp[0] if isinstance(raw_resp, list) and len(raw_resp) > 0 else raw_resp
         if isinstance(target, dict):
-            for k in ("ShippingNoteNo", "SNNo", "Shipment_Number", "ShipmentNumber", "AWBNo", "ShipmentNo"):
+            for k in ("ShippingNoteNumber", "ShippingNoteNo", "SNNo", "Shipment_Number", "ShipmentNumber", "AWBNo", "ShipmentNo"):
                 val = target.get(k)
                 if val and str(val).strip():
                     return str(val).strip()
@@ -85,7 +85,53 @@ class BVCClient:
         return None
 
     # =====================================================================
-    # 1. Create Shipment (V3) - NEVER AUTO-RETRY TO PREVENT DUPLICATES
+    # 1. Create Shipment (V1) - NEVER AUTO-RETRY TO PREVENT DUPLICATES
+    # =====================================================================
+    def create_shipment_v1(
+        self,
+        payload: List[Dict[str, Any]]
+    ) -> Tuple[bool, Any, Optional[str], Optional[str]]:
+        """
+        POST CreateShipments (JSON Array).
+        NEVER auto-retries CreateShipments blindly (risk of duplicate shipments).
+        Returns: (is_success, raw_response, shipping_note_no, error_message)
+        """
+        url = self.base_url + "CreateShipments"
+        headers = self._get_headers()
+
+        logger.info(f"POST {url} with headers {self._mask_headers(headers)}")
+
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                resp = client.post(url, json=payload, headers=headers)
+
+            try:
+                data = resp.json()
+            except Exception:
+                data = resp.text
+
+            if resp.status_code >= 400:
+                err = f"HTTP {resp.status_code}: {data}"
+                return False, data, None, err
+
+            body_err = self._inspect_response_for_errors(data)
+            if body_err:
+                return False, data, None, body_err
+
+            sn_no = self._extract_shipping_note_no(data)
+            return True, data, sn_no, None
+
+        except httpx.TimeoutException as e:
+            err = f"BVC CreateShipments timed out after {self.timeout}s: {e}. Shipment may have been created; not retrying."
+            logger.error(err)
+            return False, None, None, err
+        except httpx.RequestError as e:
+            err = f"BVC CreateShipments network request failed: {e}"
+            logger.error(err)
+            return False, None, None, err
+
+    # =====================================================================
+    # 1b. Create Shipment (V3) - NEVER AUTO-RETRY TO PREVENT DUPLICATES
     # =====================================================================
     def create_shipment_v3(
         self,
@@ -229,6 +275,60 @@ class BVCClient:
 
             except httpx.RequestError as e:
                 last_err = f"Network error during ViewShipments: {e}"
+                if attempt == max_attempts:
+                    return False, None, last_err
+
+        return False, data, last_err
+
+    # =====================================================================
+    # 3b. Track Shipments - Retries 2x on network error / 5xx
+    # =====================================================================
+    def track_shipment(
+        self,
+        shipping_note_no: str
+    ) -> Tuple[bool, Any, Optional[str]]:
+        """
+        GET {BVC_BASE_URL}{bvc_tracking_path}?ShippingNoteNo=XXXX
+        Returns an ARRAY of events (newest first): SNNo, TrackingEventDetails, City, TrackingStatus, etc.
+        Reads the first element of the returned array as the current status.
+        Returns: (is_success, raw_response, error_message)
+        """
+        tracking_path = getattr(self.settings, "bvc_tracking_path", "TrackShipments") or "TrackShipments"
+        url = self.base_url + tracking_path
+        params = {"ShippingNoteNo": shipping_note_no.strip()}
+        headers = self._get_headers()
+
+        max_attempts = 3
+        last_err: Optional[str] = None
+        data: Any = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    resp = client.get(url, params=params, headers=headers)
+
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = resp.text
+
+                if 400 <= resp.status_code < 500:
+                    return False, data, f"HTTP {resp.status_code}: {data}"
+
+                if resp.status_code >= 500:
+                    last_err = f"BVC HTTP {resp.status_code}: {data}"
+                    if attempt < max_attempts:
+                        continue
+                    return False, data, last_err
+
+                body_err = self._inspect_response_for_errors(data)
+                if body_err:
+                    return False, data, body_err
+
+                return True, data, None
+
+            except httpx.RequestError as e:
+                last_err = f"Network error during track_shipment: {e}"
                 if attempt == max_attempts:
                     return False, None, last_err
 

@@ -257,9 +257,15 @@ document.addEventListener("DOMContentLoaded", () => {
       if (v.is_shipped) {
         valHtml = '<span class="val-ready" style="background:rgba(56,189,248,0.15);color:#38bdf8;border-color:rgba(56,189,248,0.4)">Shipped</span>';
       } else if (v.is_ready) {
-        valHtml = '<span class="val-ready">Ready</span>';
+        if (v.warnings && v.warnings.length > 0) {
+          const warnTip = v.warnings.join("\n");
+          valHtml = `<span class="val-ready" title="${escapeHtml(warnTip)}" style="background:rgba(234,179,8,0.15);color:#eab308;border-color:rgba(234,179,8,0.4);cursor:help">Ready ⚠️</span>`;
+        } else {
+          valHtml = '<span class="val-ready">Ready</span>';
+        }
       } else {
-        const tooltip = (v.missing_fields || []).join("\n");
+        const allNotes = [...(v.missing_fields || []), ...(v.warnings ? v.warnings.map(w => `[Warning] ${w}`) : [])];
+        const tooltip = allNotes.join("\n");
         valHtml = `<span class="val-missing" title="${escapeHtml(tooltip)}">Missing (${v.missing_fields.length})</span>`;
       }
 

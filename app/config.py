@@ -9,7 +9,7 @@ import os
 from functools import lru_cache
 from typing import Optional, Set
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # UAT Serviceable Pincodes confirmed by BVC documentation
@@ -43,7 +43,16 @@ class Settings(BaseSettings):
     bvc_app_id: str = Field(default="", alias="BVC_APP_ID")
     bvc_app_key: str = Field(default="", alias="BVC_APP_KEY")
     bvc_shipping_account: str = Field(default="SJ", alias="BVC_SHIPPING_ACCOUNT")
-    bvc_tracking_path: str = Field(default="GetTrackingDetails", alias="BVC_TRACKING_PATH")
+    bvc_api_version: str = Field(default="v1", alias="BVC_API_VERSION")
+    bvc_tracking_path: str = Field(default="TrackShipments", alias="BVC_TRACKING_PATH")
+
+    @field_validator("bvc_api_version")
+    @classmethod
+    def validate_api_version(cls, v: str) -> str:
+        clean = (v or "").strip().lower()
+        if clean not in ("v1", "v3"):
+            raise ValueError(f"BVC_API_VERSION must be 'v1' or 'v3', got '{v}'")
+        return clean
 
     # TallyPrime Gateway Configuration
     tally_url: str = Field(default="http://localhost:9000", alias="TALLY_URL")

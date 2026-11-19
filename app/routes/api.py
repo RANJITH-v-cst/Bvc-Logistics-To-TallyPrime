@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.bvc.client import BVCClient
+from app.bvc.payload_v1 import build_v1_payload, validate_voucher_for_v1
 from app.bvc.payload_v3 import (
     build_v3_payload,
     clean_address_line1,
@@ -93,77 +94,28 @@ def assess_voucher_readiness(
             "missing_fields": [],
         }
 
-    # 1. Service validation
-    service = str(vch.get("ADVBVCService") or vch.get("BVCService") or "").strip()
-    valid_services = {"ValSHIP", "SilverSHIP", "GenSHIP", "ExhibiSHIP"}
-    if not service:
-        missing.append("BVC Service is missing")
-    elif service not in valid_services:
-        missing.append(f"Invalid Service '{service}' (must be ValSHIP/SilverSHIP/GenSHIP/ExhibiSHIP)")
-
-    # 2. Product description
-    product = str(vch.get("ADVBVCProduct") or vch.get("BVCProductDesc") or "").strip()
-    if not product:
-        missing.append("Product description is missing")
-
-    # 3. Net weight
-    raw_net = str(vch.get("ADVBVCNetWt") or vch.get("BVCNetWeightGm") or "").strip()
-    net_val = 0.0
-    if not raw_net:
-        missing.append("Net weight (g) is missing")
+    warnings: List[str] = []
+    api_version = settings.bvc_api_version.lower()
+    if api_version == "v1":
+        is_ready, missing, warnings = validate_voucher_for_v1(vch, ledger, settings)
     else:
-        try:
-            net_val = float(raw_net)
-            if net_val <= 0:
-                missing.append("Net weight must be > 0g")
-        except ValueError:
-            missing.append(f"Net weight '{raw_net}' is not a valid number")
-
-    # 4. Gross weight
-    raw_gross = str(vch.get("ADVBVCGrossWt") or vch.get("BVCGrossWeightKg") or "").strip()
-    if raw_gross:
-        try:
-            gross_val = float(raw_gross)
-            if gross_val > 0 and net_val > 0 and gross_val < net_val:
-                missing.append(f"Gross weight ({gross_val}g) cannot be less than Net weight ({net_val}g)")
-        except ValueError:
-            missing.append(f"Gross weight '{raw_gross}' is not a valid number")
-
-    # 5. Pincode
-    pin = str(vch.get("pincode") or ledger.get("pincode") or "").strip()
-    if not pin:
-        missing.append("Destination pincode is missing")
-    else:
-        is_pin_valid, _ = validate_pincode(pin)
-        if not is_pin_valid:
-            missing.append(f"Pincode '{pin}' must be exactly 6 digits")
-        elif settings.env.lower() == "uat" and pin not in UAT_SERVICEABLE_PINCODES:
-            missing.append(f"Pincode '{pin}' is outside BVC UAT serviceable list")
-
-    # 6. Party name & Address
-    party = str(vch.get("party_name") or "").strip()
-    if not party:
-        missing.append("Party ledger name is missing")
-
-    addr = str(vch.get("address") or ledger.get("address") or "").strip()
-    if not addr or len(addr) < 5:
-        missing.append("Party address is missing or too short (min 5 chars)")
-
-    # 7. Amount
-    try:
-        amt = float(vch.get("amount") or 0.0)
-        if amt <= 0:
-            missing.append("Invoice total amount must be > 0")
-    except ValueError:
-        missing.append("Invalid voucher amount")
+        is_ready, missing = validate_voucher_for_v3(vch, ledger)
+        pin = str(vch.get("pincode") or ledger.get("pincode") or "").strip()
+        clean_pin = "".join(filter(str.isdigit, pin))
+        if settings.env.lower() == "uat" and clean_pin and clean_pin not in UAT_SERVICEABLE_PINCODES:
+            warnings.append(
+                f"Pincode '{clean_pin}' is outside the confirmed BVC UAT serviceable list "
+                f"({', '.join(sorted(UAT_SERVICEABLE_PINCODES))}). Shipment creation in UAT may fail or require manual test routing."
+            )
 
     return {
         "is_shipped": False,
-        "is_ready": len(missing) == 0,
+        "is_ready": is_ready,
         "status": effective_status,
         "shipping_note_no": effective_sn,
         "error": effective_error,
         "missing_fields": missing,
+        "warnings": warnings,
     }
 
 
@@ -182,6 +134,7 @@ def get_ui_config(settings: Settings = Depends(get_settings)):
         "tally_company": settings.tally_company,
         "bvc_base_url": settings.bvc_base_url,
         "bvc_account": settings.bvc_shipping_account,
+        "bvc_api_version": settings.bvc_api_version.lower(),
         "uat_pincodes": sorted(list(UAT_SERVICEABLE_PINCODES)),
     }
 
@@ -238,20 +191,24 @@ def get_vouchers(
         )
 
     processed_vouchers: List[Dict[str, Any]] = []
+    ledger_cache: Dict[str, Dict[str, Any]] = {}
 
     for vch in raw_vouchers:
         guid = vch.get("guid") or ""
         audit_rec = get_shipment_by_guid(guid) if guid else None
 
-        # Ledger fallback for address/pincode if empty on voucher
+        # Ledger lookup for address, pincode, and BVC destination details
+        p_name = vch.get("party_name") or ""
         ledger_info: Dict[str, Any] = {}
-        if not vch.get("address") or not vch.get("pincode"):
-            p_name = vch.get("party_name")
-            if p_name:
+        if p_name:
+            if p_name in ledger_cache:
+                ledger_info = ledger_cache[p_name]
+            else:
                 try:
                     ledger_info = tally_client.fetch_party_ledger(party_name=p_name, company=company)
+                    ledger_cache[p_name] = ledger_info
                 except Exception:
-                    pass
+                    ledger_cache[p_name] = {}
 
         # Complete missing address/pincode from ledger if voucher didn't have them
         if not vch.get("address") and ledger_info.get("address"):
@@ -294,6 +251,7 @@ def get_vouchers(
             "is_ready": assessment["is_ready"],
             "is_shipped": assessment["is_shipped"],
             "missing_fields": assessment["missing_fields"],
+            "warnings": assessment.get("warnings", []),
         }
         processed_vouchers.append(row)
 
@@ -406,7 +364,12 @@ def process_batch_shipments(
                 pass
 
         # Validate voucher
-        is_valid, val_errors = validate_voucher_for_v3(voucher, ledger_data)
+        api_version = settings.bvc_api_version.lower()
+        if api_version == "v1":
+            is_valid, val_errors, val_warnings = validate_voucher_for_v1(voucher, ledger_data, settings)
+        else:
+            is_valid, val_errors = validate_voucher_for_v3(voucher, ledger_data)
+
         if not is_valid:
             err_str = "; ".join(val_errors)
             # Record failed in Tally & audit
@@ -442,44 +405,48 @@ def process_batch_shipments(
             fail_count += 1
             continue
 
-        # Build V3 Payload
-        try:
-            payload = build_v3_payload(voucher, ledger_data, settings)
-        except NotImplementedError as e:
-            err_str = str(e)
-            save_shipment_audit(
-                voucher_guid=clean_guid,
-                voucher_no=v_no,
-                company=company,
-                request_data={},
-                response_data={"error": err_str},
-                status="Failed",
-            )
+        # Build payload & call BVC CreateShipment
+        if api_version == "v1":
+            payload = build_v1_payload(voucher, ledger_data, settings)
+            is_success, raw_resp, sn_no, call_err = bvc_client.create_shipment_v1(payload)
+        else:
             try:
-                tally_client.alter_voucher(
-                    guid=clean_guid,
-                    vchno=v_no,
-                    date=v_date,
-                    vtype=v_type,
-                    status="Failed",
-                    error_msg="V3 schema pending in docs/bvc_v3_create_shipment.md",
+                payload = build_v3_payload(voucher, ledger_data, settings)
+            except NotImplementedError as e:
+                err_str = str(e)
+                save_shipment_audit(
+                    voucher_guid=clean_guid,
+                    voucher_no=v_no,
                     company=company,
+                    request_data={},
+                    response_data={"error": err_str},
+                    status="Failed",
                 )
-            except Exception:
-                pass
+                try:
+                    tally_client.alter_voucher(
+                        guid=clean_guid,
+                        vchno=v_no,
+                        date=v_date,
+                        vtype=v_type,
+                        status="Failed",
+                        error_msg="V3 schema pending in docs/bvc_v3_create_shipment.md",
+                        company=company,
+                    )
+                except Exception:
+                    pass
 
-            results.append({
-                "guid": clean_guid,
-                "voucher_number": v_no,
-                "ok": False,
-                "status": "Failed",
-                "message": err_str,
-            })
-            fail_count += 1
-            continue
+                results.append({
+                    "guid": clean_guid,
+                    "voucher_number": v_no,
+                    "ok": False,
+                    "status": "Failed",
+                    "message": err_str,
+                })
+                fail_count += 1
+                continue
 
-        # Call BVC CreateShipment/V3
-        is_success, raw_resp, sn_no, call_err = bvc_client.create_shipment_v3(payload)
+            # Call BVC CreateShipment/V3
+            is_success, raw_resp, sn_no, call_err = bvc_client.create_shipment_v3(payload)
 
         if not is_success or not sn_no:
             bvc_err = call_err or "BVC rejected shipment creation"

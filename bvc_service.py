@@ -210,7 +210,7 @@ def extract_shipment_number(
     # 3. Confirmed standard BVC field fallback
     target_obj = response_data[0] if isinstance(response_data, list) and len(response_data) > 0 else response_data
     if isinstance(target_obj, dict):
-        for confirmed_key in ("Shipment_Number", "AWBNo", "ShipmentNumber"):
+        for confirmed_key in ("ShippingNoteNumber", "ShippingNoteNo", "SNNo", "Shipment_Number", "AWBNo", "ShipmentNumber"):
             candidate = target_obj.get(confirmed_key)
             if candidate is not None and str(candidate).strip():
                 return str(candidate).strip()
@@ -230,12 +230,12 @@ def inspect_response_for_errors(raw_response: Any) -> Optional[str]:
     if isinstance(target, dict):
         status_flag = str(target.get("Status") or target.get("status") or "").upper()
         if status_flag in ("FAILED", "FAILURE", "ERROR"):
-            err_msg = target.get("ErrorMessage") or target.get("Error") or target.get("Message") or target.get("message")
+            err_msg = target.get("ErrorDetails") or target.get("ErrorMessage") or target.get("Error") or target.get("Message") or target.get("message")
             return str(err_msg or f"BVC reported status: {status_flag}")
 
         is_success = target.get("isSuccess") if "isSuccess" in target else target.get("IsSuccess")
         if is_success is False:
-            err_msg = target.get("ErrorMessage") or target.get("Error") or target.get("Message") or target.get("message")
+            err_msg = target.get("ErrorDetails") or target.get("ErrorMessage") or target.get("Error") or target.get("Message") or target.get("message")
             return str(err_msg or "BVC reported isSuccess: false")
 
         error_field = target.get("Error") or target.get("error") or target.get("ErrorMessage") or target.get("errorMessage")

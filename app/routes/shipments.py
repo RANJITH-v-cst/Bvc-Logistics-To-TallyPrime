@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.bvc.client import BVCClient
+from app.bvc.payload_v1 import build_v1_payload, validate_voucher_for_v1
 from app.bvc.payload_v3 import build_v3_payload, validate_voucher_for_v3
 from app.config import Settings, get_settings
 from app.store import (
@@ -143,7 +144,12 @@ def create_shipment_from_voucher(
         logger.warning(pincode_warning)
 
     # 4. Pre-validate voucher fields (no silent defaults)
-    is_valid, validation_errors = validate_voucher_for_v3(voucher, ledger_data)
+    api_version = settings.bvc_api_version.lower()
+    if api_version == "v1":
+        is_valid, validation_errors, val_warnings = validate_voucher_for_v1(voucher, ledger_data, settings)
+    else:
+        is_valid, validation_errors = validate_voucher_for_v3(voucher, ledger_data)
+
     if not is_valid:
         err_summary = "; ".join(validation_errors)
         short_err = f"Failed: {err_summary}"[:250]
@@ -175,47 +181,50 @@ def create_shipment_from_voucher(
             },
         )
 
-    # 5. Build V3 Payload (Raises 501 if V3 schema not confirmed)
-    try:
-        payload = build_v3_payload(voucher, ledger_data, settings)
-    except NotImplementedError as e:
-        err_msg = str(e)
-        logger.error(err_msg)
-        tally_client.alter_voucher(
-            guid=guid,
-            vchno=voucher.get("voucher_number") or "",
-            date=voucher.get("date") or "",
-            vtype=voucher.get("voucher_type") or "Sales",
-            status="Failed",
-            error_msg=err_msg[:250],
-            company=company,
-        )
-        save_shipment_audit(
-            voucher_guid=guid,
-            voucher_no=voucher.get("voucher_number") or "",
-            company=company,
-            request_data={},
-            response_data={"error": err_msg},
-            status="Failed",
-        )
-        return JSONResponse(
-            status_code=501,
-            content={
-                "ok": False,
-                "message": err_msg,
-                "open_item": "Please paste Postman V3 body + parameter table into docs/bvc_v3_create_shipment.md",
-                "validated_fields": {
-                    "voucher_number": voucher.get("voucher_number"),
-                    "amount": voucher.get("amount"),
-                    "packages": voucher.get("BVCNoOfPackages"),
-                    "net_weight_gm": voucher.get("BVCNetWeightGm"),
-                    "consignee_code": voucher.get("BVCConsigneeAddressCode") or ledger_data.get("BVCDestAddressID"),
+    # 5. Build Payload & 6. Call BVC (Single attempt, NO auto-retry)
+    if api_version == "v1":
+        payload = build_v1_payload(voucher, ledger_data, settings)
+        is_success, raw_resp, sn_no, call_err = bvc_client.create_shipment_v1(payload)
+    else:
+        try:
+            payload = build_v3_payload(voucher, ledger_data, settings)
+        except NotImplementedError as e:
+            err_msg = str(e)
+            logger.error(err_msg)
+            tally_client.alter_voucher(
+                guid=guid,
+                vchno=voucher.get("voucher_number") or "",
+                date=voucher.get("date") or "",
+                vtype=voucher.get("voucher_type") or "Sales",
+                status="Failed",
+                error_msg=err_msg[:250],
+                company=company,
+            )
+            save_shipment_audit(
+                voucher_guid=guid,
+                voucher_no=voucher.get("voucher_number") or "",
+                company=company,
+                request_data={},
+                response_data={"error": err_msg},
+                status="Failed",
+            )
+            return JSONResponse(
+                status_code=501,
+                content={
+                    "ok": False,
+                    "message": err_msg,
+                    "open_item": "Please paste Postman V3 body + parameter table into docs/bvc_v3_create_shipment.md",
+                    "validated_fields": {
+                        "voucher_number": voucher.get("voucher_number"),
+                        "amount": voucher.get("amount"),
+                        "packages": voucher.get("BVCNoOfPackages"),
+                        "net_weight_gm": voucher.get("BVCNetWeightGm"),
+                        "consignee_code": voucher.get("BVCConsigneeAddressCode") or ledger_data.get("BVCDestAddressID"),
+                    },
                 },
-            },
-        )
+            )
 
-    # 6. Call BVC CreateShipment/V3 (Single attempt, NO auto-retry)
-    is_success, raw_resp, sn_no, call_err = bvc_client.create_shipment_v3(payload)
+        is_success, raw_resp, sn_no, call_err = bvc_client.create_shipment_v3(payload)
 
     if not is_success or not sn_no:
         fail_msg = call_err or "BVC returned success but no shipping note number was found in response"
@@ -416,4 +425,42 @@ def get_shipment_details(
         "ok": True,
         "shipping_note_no": sn,
         "data": raw_resp,
+    }
+
+
+# =========================================================================
+# 4. GET /shipments/{shipping_note_no}/track
+# =========================================================================
+
+@router.get("/{shipping_note_no}/track")
+def track_shipment_details(
+    shipping_note_no: str,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Query BVC TrackShipments API for tracking history.
+    Reads the first element of the returned array as the current status.
+    """
+    verify_token(request, settings)
+
+    sn = shipping_note_no.strip()
+    bvc_client = BVCClient(settings)
+    is_success, raw_resp, err = bvc_client.track_shipment(sn)
+
+    if not is_success:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "message": f"Failed to retrieve tracking details: {err}", "raw_response": raw_resp},
+        )
+
+    current_event = raw_resp[0] if isinstance(raw_resp, list) and len(raw_resp) > 0 else (raw_resp or {})
+    current_status = current_event.get("TrackingStatus") if isinstance(current_event, dict) else str(current_event)
+
+    return {
+        "ok": True,
+        "shipping_note_no": sn,
+        "current_status": current_status,
+        "current_event": current_event,
+        "events": raw_resp if isinstance(raw_resp, list) else [raw_resp],
     }

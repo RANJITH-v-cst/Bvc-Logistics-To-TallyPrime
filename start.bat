@@ -22,7 +22,7 @@ echo [INFO] ReDoc API Docs: http://127.0.0.1:8000/redoc
 echo [INFO] Press Ctrl+C to stop the service.
 echo.
 
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --log-level info
 
 if %ERRORLEVEL% neq 0 (
     echo.

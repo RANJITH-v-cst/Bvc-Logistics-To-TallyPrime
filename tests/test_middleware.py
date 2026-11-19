@@ -19,17 +19,23 @@ import requests
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import (
-    app,
-    debug_voucher,
-    handle_push_request,
-    health,
-    push_get,
-    push_post,
-    root,
-    track,
-    verify_api_token,
-)
+import importlib.util
+
+_root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_app_py_path = os.path.join(_root_dir, "app.py")
+_spec = importlib.util.spec_from_file_location("root_app", _app_py_path)
+_root_app = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_root_app)
+
+app = _root_app.app
+debug_voucher = _root_app.debug_voucher
+handle_push_request = _root_app.handle_push_request
+health = _root_app.health
+push_get = _root_app.push_get
+push_post = _root_app.push_post
+root = _root_app.root
+track = _root_app.track
+verify_api_token = _root_app.verify_api_token
 from bvc_service import (
     build_bvc_shipment_payload,
     call_bvc_create_shipment,
@@ -92,7 +98,7 @@ def mock_config(monkeypatch):
         },
     }
     monkeypatch.setattr("config_manager.load_config", lambda *args, **kwargs: test_cfg)
-    monkeypatch.setattr("app.load_config", lambda *args, **kwargs: test_cfg)
+    monkeypatch.setattr(_root_app, "load_config", lambda *args, **kwargs: test_cfg)
     return test_cfg
 
 
