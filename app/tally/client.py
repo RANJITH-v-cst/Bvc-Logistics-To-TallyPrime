@@ -427,7 +427,11 @@ class TallyClient:
                 continue
 
             address_lines = []
-            for child in lnode:
+            # iter() walks nested children too: TallyPrime keeps Address/Pincode inside
+            # LEDMAILINGDETAILS.LIST > ADDRESS.LIST, not as direct children of LEDGER.
+            for child in lnode.iter():
+                if child is lnode:
+                    continue
                 text_val = (child.text or "").strip()
                 tag = normalize_tag(getattr(child, "tag", ""))
 
