@@ -195,6 +195,9 @@ class TallyClient:
         for vnode in root.iter():
             if not node_matches(vnode, "VOUCHER"):
                 continue
+            # Skip CMPINFO summary nodes like <VOUCHER>0</VOUCHER>
+            if not vnode.attrib and len(vnode) == 0:
+                continue
 
             v_type = vnode.get("VOUCHERTYPENAME") or ""
             v_num = vnode.get("VOUCHERNUMBER") or ""
@@ -289,6 +292,9 @@ class TallyClient:
 
         for vnode in root.iter():
             if not node_matches(vnode, "VOUCHER"):
+                continue
+            # Skip CMPINFO summary nodes like <VOUCHER>0</VOUCHER>
+            if not vnode.attrib and len(vnode) == 0:
                 continue
 
             v_type = vnode.get("VOUCHERTYPENAME") or ""
@@ -424,6 +430,9 @@ class TallyClient:
 
         for lnode in root.iter():
             if not node_matches(lnode, "LEDGER"):
+                continue
+            # Skip CMPINFO summary nodes like <LEDGER>0</LEDGER>
+            if not lnode.attrib and len(lnode) == 0:
                 continue
 
             address_lines = []
