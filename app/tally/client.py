@@ -435,13 +435,13 @@ class TallyClient:
                 text_val = (child.text or "").strip()
                 tag = normalize_tag(getattr(child, "tag", ""))
 
-                if "ADDRESS" in tag and text_val:
+                if tag == "ADDRESS" and text_val:
                     address_lines.append(text_val)
-                elif "PINCODE" in tag and not res["pincode"]:
+                elif tag == "PINCODE" and not res["pincode"]:
                     res["pincode"] = text_val
-                elif "STATENAME" in tag and not res["state"]:
+                elif ("STATENAME" in tag or tag == "PRIORSTATENAME") and not res["state"]:
                     res["state"] = text_val
-                elif "COUNTRYNAME" in tag and not res["country"]:
+                elif ("COUNTRYNAME" in tag or tag == "COUNTRYOFRESIDENCE") and not res["country"]:
                     res["country"] = text_val
                 elif "INCOMETAXNUMBER" in tag and not res["pan"]:
                     res["pan"] = text_val
