@@ -263,6 +263,7 @@ class TallyClient:
                 "ADVBVCNetWt": extract_udf_value(vnode, "ADVBVCNetWt"),
                 "ADVBVCGrossWt": extract_udf_value(vnode, "ADVBVCGrossWt"),
                 "ADVBVCInsurance": extract_udf_value(vnode, "ADVBVCInsurance"),
+                "ADVBVCLiabilityType": extract_udf_value(vnode, "ADVBVCLiabilityType"),
                 "ADVBVCExhibition": extract_udf_value(vnode, "ADVBVCExhibition"),
                 "BVCDestAddressID": extract_udf_value(vnode, "BVCDestAddressID"),
                 "BVCDestAccountID": extract_udf_value(vnode, "BVCDestAccountID"),
@@ -365,6 +366,7 @@ class TallyClient:
             gross_wt = extract_udf_value(vnode, "ADVBVCGrossWt") or extract_udf_value(vnode, "BVCGrossWeightKg")
             insurance = extract_udf_value(vnode, "ADVBVCInsurance") or extract_udf_value(vnode, "BVCInsurance") or "No"
             exhibition = extract_udf_value(vnode, "ADVBVCExhibition") or "No"
+            liability_type = extract_udf_value(vnode, "ADVBVCLiabilityType")
             shipment_no = extract_udf_value(vnode, "ADVBVCShipmentNo") or extract_udf_value(vnode, "BVCShipmentNo")
             status = extract_udf_value(vnode, "ADVBVCStatus") or extract_udf_value(vnode, "BVCStatus")
             created_on = extract_udf_value(vnode, "ADVBVCCreatedOn") or extract_udf_value(vnode, "BVCCreatedOn")
@@ -391,6 +393,7 @@ class TallyClient:
                 "ADVBVCNetWt": net_wt,
                 "ADVBVCGrossWt": gross_wt,
                 "ADVBVCInsurance": insurance,
+                "ADVBVCLiabilityType": liability_type,
                 "ADVBVCExhibition": exhibition,
                 "ADVBVCShipmentNo": shipment_no,
                 "ADVBVCStatus": status,

@@ -36,6 +36,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import Settings, UAT_SERVICEABLE_PINCODES
 
+# Values offered by the BVC portal's Liability Type dropdown (and the TDL table)
+LIABILITY_TYPES = ("All Risk Liability", "Fidelity Liability")
+
 logger = logging.getLogger("payload_v1")
 
 ALLOWED_V1_SERVICES = ("GoldSHIP", "ValSHIP", "SilverSHIP", "ExhibiSHIP")
@@ -173,6 +176,15 @@ def validate_voucher_for_v1(
     except ValueError:
         errors.append(f"Invoice Value '{raw_amt}' is not a valid number")
 
+    # 7b. Liability Type is required when BVC insurance is Yes
+    ins_raw = str(voucher.get("ADVBVCInsurance") or voucher.get("BVCInsurance") or "").strip().lower()
+    if ins_raw in ("yes", "y", "true", "1"):
+        liability = str(voucher.get("ADVBVCLiabilityType") or "").strip()
+        if not liability:
+            errors.append("Liability Type is required when Insurance by BVC is Yes (All Risk Liability / Fidelity Liability)")
+        elif liability not in LIABILITY_TYPES:
+            errors.append(f"Liability Type '{liability}' must be one of: {', '.join(LIABILITY_TYPES)}")
+
     # 8. Party Address (min 5 chars)
     party_addr = str(voucher.get("address") or ledger.get("address") or "").strip()
     if not party_addr or len(party_addr) < 5:
@@ -302,5 +314,10 @@ def build_v1_payload(
         "Reference1": vchno,
         "SubBillingAccountShortcode": "",
     }
+
+    # Liability Type (only when insured). Key name is configurable until BVC confirms it.
+    liability_key = str(getattr(settings, "bvc_liability_field", "") or "").strip()
+    if insurance_str == "Yes" and liability_key:
+        payload_item[liability_key] = str(voucher.get("ADVBVCLiabilityType") or "").strip()
 
     return [payload_item]

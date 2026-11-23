@@ -19,6 +19,7 @@
     ADVBVCGrossWt            : Amount  : 41104
     ADVBVCInsurance          : Logical : 41105
     ADVBVCExhibition         : Logical : 41106
+    ADVBVCLiabilityType      : String  : 41111
 
     ;; ADV BVC Write-Back & Audit UDFs (Indexes 41107 - 41110)
     ADVBVCShipmentNo         : String  : 41107
@@ -75,6 +76,11 @@
     List Name : "GenSHIP"
     List Name : "ExhibiSHIP"
 
+[Collection: ADVBVCLiabilityTable]
+    Title     : "Select Liability Type"
+    List Name : "All Risk Liability"
+    List Name : "Fidelity Liability"
+
 [Collection: ADVBVCProductTable]
     Title     : "Select BVC Product Description"
     List Name : "Diamond Jewellery"
@@ -94,7 +100,7 @@
     Add : Part : At End : ADV BVC Shipment Part
 
 [Part: ADV BVC Shipment Part]
-    Lines : ADV BVC Header Line, ADV BVC Input Line 1, ADV BVC Input Line 2, ADV BVC Writeback Line 1, ADV BVC Writeback Line 2
+    Lines : ADV BVC Header Line, ADV BVC Input Line 1, ADV BVC Input Line 2, ADV BVC Input Line 3, ADV BVC Writeback Line 1, ADV BVC Writeback Line 2
     Invisible : NOT (@@IsBVCEnabled AND $$IsSales:$VoucherTypeName)
 
 ;; Header Line
@@ -187,6 +193,25 @@
     Storage : ADVBVCExhibition
     Set as  : if $$IsEmpty:$ADVBVCExhibition then No else $ADVBVCExhibition
     Width   : 8
+
+;; Line 3: Liability Type (visible and mandatory only when Insurance by BVC = Yes)
+[Line: ADV BVC Input Line 3]
+    Invisible : NOT $ADVBVCInsurance
+    Field     : ADV BVC Prompt Liability, ADV BVC Field Liability
+
+[Field: ADV BVC Prompt Liability]
+    Use    : Simple Field
+    Set as : "Liability Type:"
+    Width  : 18
+    Skip   : Yes
+
+[Field: ADV BVC Field Liability]
+    Use        : Name Field
+    Storage    : ADVBVCLiabilityType
+    Table      : ADVBVCLiabilityTable
+    Show Table : Always
+    Mandatory  : Yes
+    Width      : 22
 
 ;; Write-back Line 1: Shipment No & Status (Read-Only, Shown only when Service is chosen)
 [Line: ADV BVC Writeback Line 1]

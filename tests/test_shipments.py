@@ -647,3 +647,47 @@ def test_track_shipment_endpoint(client: TestClient):
         assert data["current_event"]["City"] == "Mumbai"
         assert len(data["events"]) == 2
 
+
+
+def _insured_voucher(**extra):
+    base = {
+        "voucher_number": "INV-1",
+        "date": "20261118",
+        "amount": "150000",
+        "BVCDestAccountID": "ACC",
+        "BVCDestAddressID": "ADDR",
+        "BVCNoOfPackages": "1",
+        "ADVBVCNetWt": "10",
+        "ADVBVCProduct": "Gold",
+        "address": "1st Floor, Commercial Road",
+        "pincode": "600001",
+        "ADVBVCInsurance": "Yes",
+    }
+    base.update(extra)
+    return base
+
+
+def test_liability_type_required_when_insured():
+    ok, errors, _ = validate_voucher_for_v1(_insured_voucher(), {}, Settings())
+    assert not ok
+    assert any("Liability Type is required" in e for e in errors)
+
+
+def test_liability_type_not_required_without_insurance():
+    ok, errors, _ = validate_voucher_for_v1(_insured_voucher(ADVBVCInsurance="No"), {}, Settings())
+    assert not any("Liability" in e for e in errors)
+
+
+def test_liability_type_rejects_unknown_value():
+    ok, errors, _ = validate_voucher_for_v1(_insured_voucher(ADVBVCLiabilityType="Random"), {}, Settings())
+    assert any("must be one of" in e for e in errors)
+
+
+def test_liability_type_sent_only_when_key_configured():
+    v = _insured_voucher(ADVBVCLiabilityType="Fidelity Liability")
+    assert "Liability_Type" not in build_v1_payload(v, {}, Settings())[0]
+    item = build_v1_payload(v, {}, Settings(BVC_LIABILITY_FIELD="Liability_Type"))[0]
+    assert item["Liability_Type"] == "Fidelity Liability"
+    assert item["InsuranceByBVC"] == "Yes"
+    uninsured = build_v1_payload(_insured_voucher(ADVBVCInsurance="No", ADVBVCLiabilityType="Fidelity Liability"), {}, Settings(BVC_LIABILITY_FIELD="Liability_Type"))[0]
+    assert "Liability_Type" not in uninsured

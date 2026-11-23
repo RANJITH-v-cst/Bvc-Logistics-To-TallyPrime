@@ -244,6 +244,7 @@ def get_vouchers(
             "net_wt": vch.get("ADVBVCNetWt") or vch.get("BVCNetWeightGm") or "",
             "gross_wt": vch.get("ADVBVCGrossWt") or vch.get("BVCGrossWeightKg") or "",
             "insurance": vch.get("ADVBVCInsurance") or vch.get("BVCInsurance") or "No",
+            "liability_type": vch.get("ADVBVCLiabilityType") or "",
             "exhibition": vch.get("ADVBVCExhibition") or "No",
             "shipment_no": assessment["shipping_note_no"],
             "status": assessment["status"],

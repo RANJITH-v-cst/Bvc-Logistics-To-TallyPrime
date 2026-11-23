@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     bvc_shipping_account: str = Field(default="SJ", alias="BVC_SHIPPING_ACCOUNT")
     bvc_api_version: str = Field(default="v1", alias="BVC_API_VERSION")
     bvc_tracking_path: str = Field(default="TrackShipments", alias="BVC_TRACKING_PATH")
+    # Name of the CreateShipments JSON key that carries Liability Type. Left empty until
+    # confirmed from the BVC Postman/param table; when empty the value is validated but not sent.
+    bvc_liability_field: str = Field(default="", alias="BVC_LIABILITY_FIELD")
 
     @field_validator("bvc_api_version")
     @classmethod
